@@ -154,5 +154,6 @@ CAO includes these built-in profiles:
 - `code_supervisor`: Coordinates development tasks
 - `developer`: Writes code
 - `reviewer`: Performs code reviews
+- `codex_debugger`: Reproduces and fixes bugs with Codex (`gpt-5.3-codex`, high reasoning)
 
 View the [agent_store directory](https://github.com/awslabs/cli-agent-orchestrator/tree/main/src/cli_agent_orchestrator/agent_store) for examples.

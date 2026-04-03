@@ -10,6 +10,9 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-03**: Added `codex_debugger` agent profile for focused bug triage and remediation:
+  - configured to `model: gpt-5.3-codex` with `model_reasoning_effort: high`
+  - codified repro → root-cause → minimal-fix → validation workflow
 - **2026-04-03**: Robust `handoff` completion protocol for MCP orchestration:
   - moved from first-`COMPLETED` detection to explicit callback marker (`CAO_HANDOFF_COMPLETE`)
   - added safer worker cleanup (`/exit` + terminal delete) with timeout-preserve toggle
