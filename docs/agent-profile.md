@@ -32,6 +32,8 @@ Define the agent's role, responsibilities, and behavior here.
 - `toolAliases` (object): Map tool names to aliases
 - `toolsSettings` (object): Tool-specific configuration
 - `model` (string): AI model to use
+- `model_reasoning_effort` (string): Reasoning level for providers that support it (for Codex: `minimal`, `low`, `medium`, `high`, `xhigh`)
+- `model_verbosity` (string): Output verbosity for providers that support it (for Codex: `low`, `medium`, `high`)
 - `prompt` (string): Additional prompt text
 
 ## Tool Restrictions

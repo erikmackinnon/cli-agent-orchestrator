@@ -37,6 +37,14 @@ from cli_agent_orchestrator.services import terminal_service
 
 logger = logging.getLogger(__name__)
 
+# Codex may still render an idle footer while actively running a tool call.
+# Guard inbox delivery when these markers appear in the recent terminal log.
+CODEX_TOOL_CALL_ACTIVE_PATTERN = (
+    r"(?:^\s*•\s*Calling\b|"
+    r"•.*\((?:\d+h(?:\s+\d+m)?(?:\s+\d+s)?|\d+m(?:\s+\d+s)?|\d+s)\s*•\s*esc to interr?upt\)|"
+    r"messages to be submitted after next tool call)"
+)
+
 
 def _get_log_tail(terminal_id: str, lines: int = 100) -> str:
     """Get last N lines from terminal log file.
@@ -71,6 +79,19 @@ def _has_idle_pattern(terminal_id: str) -> bool:
         return False
 
 
+def _is_codex_provider(provider: object) -> bool:
+    """Best-effort check for Codex provider instance."""
+    return provider is not None and provider.__class__.__name__.lower() == "codexprovider"
+
+
+def _has_codex_tool_call_active_marker(terminal_id: str) -> bool:
+    """Check for Codex in-progress tool call markers in terminal logs."""
+    tail = _get_log_tail(terminal_id, lines=200)
+    if not tail:
+        return False
+    return bool(re.search(CODEX_TOOL_CALL_ACTIVE_PATTERN, tail, re.IGNORECASE | re.MULTILINE))
+
+
 def check_and_send_pending_messages(terminal_id: str) -> bool:
     """Check for pending messages and send if terminal is ready.
 
@@ -89,6 +110,7 @@ def check_and_send_pending_messages(terminal_id: str) -> bool:
         return False
 
     message = messages[0]
+    sender_id = getattr(message, "sender_id", "unknown")
 
     # Get provider and check status
     provider = provider_manager.get_provider(terminal_id)
@@ -102,17 +124,47 @@ def check_and_send_pending_messages(terminal_id: str) -> bool:
     status = provider.get_status()
 
     if status not in (TerminalStatus.IDLE, TerminalStatus.COMPLETED):
-        logger.debug(f"Terminal {terminal_id} not ready (status={status})")
+        logger.debug(
+            "Terminal %s not ready for inbox delivery (status=%s, message_id=%s, sender=%s)",
+            terminal_id,
+            status,
+            message.id,
+            sender_id,
+        )
+        return False
+
+    # Extra guard for Codex: if the log still shows an active tool-call marker,
+    # skip delivery even when status heuristics report IDLE/COMPLETED.
+    if _is_codex_provider(provider) and _has_codex_tool_call_active_marker(terminal_id):
+        logger.info(
+            "Skipping inbox delivery while codex tool call appears active "
+            "(terminal=%s, message_id=%s, sender=%s, status=%s)",
+            terminal_id,
+            message.id,
+            sender_id,
+            status,
+        )
         return False
 
     # Send message
     try:
         terminal_service.send_input(terminal_id, message.message)
         update_message_status(message.id, MessageStatus.DELIVERED)
-        logger.info(f"Delivered message {message.id} to terminal {terminal_id}")
+        logger.info(
+            "Delivered message %s to terminal %s (sender=%s)",
+            message.id,
+            terminal_id,
+            sender_id,
+        )
         return True
     except Exception as e:
-        logger.error(f"Failed to send message {message.id} to {terminal_id}: {e}")
+        logger.error(
+            "Failed to send message %s to %s (sender=%s): %s",
+            message.id,
+            terminal_id,
+            sender_id,
+            e,
+        )
         update_message_status(message.id, MessageStatus.FAILED)
         raise
 

@@ -36,6 +36,7 @@ work/
 
 # AI tool configs
 .claude/
+.codex
 .codex/
 .agents/
 .kiro/

@@ -131,6 +131,39 @@ class TestCheckAndSendPendingMessages:
 
     @patch("cli_agent_orchestrator.services.inbox_service.update_message_status")
     @patch("cli_agent_orchestrator.services.inbox_service.terminal_service")
+    @patch("cli_agent_orchestrator.services.inbox_service._has_codex_tool_call_active_marker")
+    @patch("cli_agent_orchestrator.services.inbox_service.provider_manager")
+    @patch("cli_agent_orchestrator.services.inbox_service.get_pending_messages")
+    def test_codex_active_tool_call_skips_delivery(
+        self,
+        mock_get_messages,
+        mock_provider_manager,
+        mock_has_active_marker,
+        mock_terminal_service,
+        mock_update_status,
+    ):
+        """Codex inbox delivery is skipped while tool call markers are active."""
+        mock_message = MagicMock()
+        mock_message.id = 1
+        mock_message.sender_id = "worker-1"
+        mock_message.message = "test message"
+        mock_get_messages.return_value = [mock_message]
+        mock_has_active_marker.return_value = True
+
+        class CodexProvider:
+            def get_status(self):
+                return TerminalStatus.COMPLETED
+
+        mock_provider_manager.get_provider.return_value = CodexProvider()
+
+        result = check_and_send_pending_messages("test-terminal")
+
+        assert result is False
+        mock_terminal_service.send_input.assert_not_called()
+        mock_update_status.assert_not_called()
+
+    @patch("cli_agent_orchestrator.services.inbox_service.update_message_status")
+    @patch("cli_agent_orchestrator.services.inbox_service.terminal_service")
     @patch("cli_agent_orchestrator.services.inbox_service.provider_manager")
     @patch("cli_agent_orchestrator.services.inbox_service.get_pending_messages")
     def test_message_sent_successfully(

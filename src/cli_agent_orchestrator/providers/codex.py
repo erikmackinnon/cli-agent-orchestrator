@@ -50,14 +50,24 @@ ERROR_PATTERN = r"^(?:Error:|ERROR:|Traceback \(most recent call last\):|panic:)
 # Used to detect when the bottom lines contain TUI chrome rather than user input.
 # v0.110 and earlier: "? for shortcuts" and "N% context left"
 # v0.111+: "model · N% left · path" (PR #13202 restored draft footer hints)
-TUI_FOOTER_PATTERN = r"(?:\?\s+for shortcuts|context left|\d+%\s+left)"
+# Newer variants include quota usage footers like:
+# "gpt-5.3-codex high · 28% used · 5h 91% · weekly 94% · 258K window ..."
+TUI_FOOTER_PATTERN = r"(?:\?\s+for shortcuts|context left|\d+%\s+left|\d+%\s+used|weekly\s+\d+%)"
 # Codex TUI progress spinner: "• Working (0s • esc to interrupt)",
-# "• Thinking (2s ...)", "• Starting script creation (10s • esc to interrupt)".
-# The prefix text varies but the "(Ns • esc to interrupt)" format is consistent.
+# "• Thinking (2s ...)", "• Starting script creation (10s • esc to interrupt)",
+# and longer durations like "• Working (1m 19s • esc to interrupt)".
+# The prefix text varies; detect h/m/s duration forms and tolerate "interrupt"
+# and the occasional misspelled "interupt" variant seen in captured logs.
 # Appears inline with --no-alt-screen when the agent is actively processing.
 # Must be checked before COMPLETED to avoid false positives (the • matches
 # ASSISTANT_PREFIX_PATTERN and the TUI footer › matches idle prompt).
-TUI_PROGRESS_PATTERN = r"•.*\(\d+s\s*•\s*esc to interrupt\)"
+TUI_PROGRESS_PATTERN = (
+    r"•.*\("
+    r"(?:\d+h(?:\s+\d+m)?(?:\s+\d+s)?|\d+m(?:\s+\d+s)?|\d+s)"
+    r"\s*•\s*esc to interr?upt\)"
+)
+# Codex tool call header shown while an MCP call is active.
+TUI_TOOL_CALL_PATTERN = r"^\s*•\s*Calling\b"
 
 # Workspace trust/approval prompt shown when Codex opens a new directory
 TRUST_PROMPT_PATTERN = r"allow Codex to work in this folder"
@@ -141,6 +151,23 @@ class CodexProvider(BaseProvider):
         if self._agent_profile is not None:
             try:
                 profile = load_agent_profile(self._agent_profile)
+                profile_model = getattr(profile, "model", None)
+                profile_reasoning = getattr(profile, "model_reasoning_effort", None)
+                profile_verbosity = getattr(profile, "model_verbosity", None)
+
+                # Allow per-agent model routing from profile frontmatter.
+                # This keeps reviewer/developer roles on different model tiers.
+                if isinstance(profile_model, str) and profile_model.strip():
+                    command_parts.extend(["-m", profile_model.strip()])
+
+                # Codex exposes reasoning and verbosity via config keys.
+                # Keep these optional and profile-scoped.
+                if isinstance(profile_reasoning, str) and profile_reasoning.strip():
+                    command_parts.extend(
+                        ["-c", f'model_reasoning_effort="{profile_reasoning.strip()}"']
+                    )
+                if isinstance(profile_verbosity, str) and profile_verbosity.strip():
+                    command_parts.extend(["-c", f'model_verbosity="{profile_verbosity.strip()}"'])
 
                 system_prompt = profile.system_prompt if profile.system_prompt is not None else ""
 
@@ -195,11 +222,11 @@ class CodexProvider(BaseProvider):
                         # create a new terminal, initialize the provider, send a message,
                         # wait for the agent to complete, and extract the output.
                         # Codex defaults to 60s which is too short for multi-step operations.
-                        # Value MUST be a TOML float (600.0, not 600) because Codex
+                        # Value MUST be a TOML float (1200.0, not 1200) because Codex
                         # deserializes tool_timeout_sec via Option<f64>; a TOML integer
                         # is silently rejected and falls back to the 60s default.
                         if "tool_timeout_sec" not in cfg:
-                            command_parts.extend(["-c", f"{prefix}.tool_timeout_sec=600.0"])
+                            command_parts.extend(["-c", f"{prefix}.tool_timeout_sec=1200.0"])
 
             except Exception as e:
                 raise ProviderError(f"Failed to load agent profile '{self._agent_profile}': {e}")
@@ -356,6 +383,11 @@ class CodexProvider(BaseProvider):
             # spinner matches ASSISTANT_PREFIX_PATTERN, causing a false COMPLETED.
             # Detect the spinner and return PROCESSING before checking for COMPLETED.
             if re.search(TUI_PROGRESS_PATTERN, tail_output, re.MULTILINE):
+                return TerminalStatus.PROCESSING
+            # During active tool calls Codex shows "• Calling ..." while the idle
+            # footer may still be rendered. Treat this as PROCESSING to avoid
+            # interrupting long-running MCP calls.
+            if re.search(TUI_TOOL_CALL_PATTERN, tail_output, re.MULTILINE):
                 return TerminalStatus.PROCESSING
 
             # Consider COMPLETED only if we see an assistant marker after the last user message.

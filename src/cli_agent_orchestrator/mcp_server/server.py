@@ -5,6 +5,7 @@ import logging
 import os
 import time
 from typing import Any, Dict, Optional, Tuple
+from uuid import uuid4
 
 import requests
 from fastmcp import FastMCP
@@ -22,6 +23,33 @@ ENABLE_WORKING_DIRECTORY = os.getenv("CAO_ENABLE_WORKING_DIRECTORY", "false").lo
 
 # Environment variable to enable/disable automatic sender terminal ID injection
 ENABLE_SENDER_ID_INJECTION = os.getenv("CAO_ENABLE_SENDER_ID_INJECTION", "false").lower() == "true"
+PRESERVE_TIMEOUT_HANDOFF_TERMINALS = (
+    os.getenv("CAO_PRESERVE_TIMED_OUT_HANDOFF_TERMINALS", "false").lower() == "true"
+)
+
+# API request timeout for MCP server -> CAO API calls.
+# Keep this bounded so tool calls fail fast instead of hanging indefinitely.
+DEFAULT_API_REQUEST_TIMEOUT = 15.0
+WORKDIR_API_REQUEST_TIMEOUT = 5.0
+
+
+def _load_api_timeout_seconds() -> float:
+    raw = os.getenv("CAO_API_REQUEST_TIMEOUT", str(DEFAULT_API_REQUEST_TIMEOUT))
+    try:
+        value = float(raw)
+        if value <= 0:
+            raise ValueError("must be > 0")
+        return value
+    except ValueError:
+        logger.warning(
+            "Invalid CAO_API_REQUEST_TIMEOUT=%r; falling back to %.1fs",
+            raw,
+            DEFAULT_API_REQUEST_TIMEOUT,
+        )
+        return DEFAULT_API_REQUEST_TIMEOUT
+
+
+API_REQUEST_TIMEOUT_SECONDS = _load_api_timeout_seconds()
 
 # Create MCP server
 mcp = FastMCP(
@@ -82,6 +110,54 @@ def _resolve_child_allowed_tools(
     return ",".join(child_allowed)
 
 
+def _api_get(
+    path: str, *, params: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None
+):
+    """Issue a GET to CAO API with bounded timeout and actionable errors."""
+    url = f"{API_BASE_URL}{path}"
+    timeout_sec = timeout if timeout is not None else API_REQUEST_TIMEOUT_SECONDS
+    try:
+        response = requests.get(url, params=params, timeout=timeout_sec)
+        response.raise_for_status()
+        return response
+    except requests.Timeout as e:
+        raise RuntimeError(f"API GET timed out after {timeout_sec}s: {url}") from e
+    except requests.RequestException as e:
+        raise RuntimeError(f"API GET failed: {url} ({e})") from e
+
+
+def _api_post(
+    path: str, *, params: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None
+):
+    """Issue a POST to CAO API with bounded timeout and actionable errors."""
+    url = f"{API_BASE_URL}{path}"
+    timeout_sec = timeout if timeout is not None else API_REQUEST_TIMEOUT_SECONDS
+    try:
+        response = requests.post(url, params=params, timeout=timeout_sec)
+        response.raise_for_status()
+        return response
+    except requests.Timeout as e:
+        raise RuntimeError(f"API POST timed out after {timeout_sec}s: {url}") from e
+    except requests.RequestException as e:
+        raise RuntimeError(f"API POST failed: {url} ({e})") from e
+
+
+def _api_delete(
+    path: str, *, params: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None
+):
+    """Issue a DELETE to CAO API with bounded timeout and actionable errors."""
+    url = f"{API_BASE_URL}{path}"
+    timeout_sec = timeout if timeout is not None else API_REQUEST_TIMEOUT_SECONDS
+    try:
+        response = requests.delete(url, params=params, timeout=timeout_sec)
+        response.raise_for_status()
+        return response
+    except requests.Timeout as e:
+        raise RuntimeError(f"API DELETE timed out after {timeout_sec}s: {url}") from e
+    except requests.RequestException as e:
+        raise RuntimeError(f"API DELETE failed: {url} ({e})") from e
+
+
 def _create_terminal(
     agent_profile: str, working_directory: Optional[str] = None
 ) -> Tuple[str, str]:
@@ -104,8 +180,7 @@ def _create_terminal(
     current_terminal_id = os.environ.get("CAO_TERMINAL_ID")
     if current_terminal_id:
         # Get terminal metadata via API
-        response = requests.get(f"{API_BASE_URL}/terminals/{current_terminal_id}")
-        response.raise_for_status()
+        response = _api_get(f"/terminals/{current_terminal_id}")
         terminal_metadata = response.json()
 
         provider = terminal_metadata["provider"]
@@ -115,17 +190,12 @@ def _create_terminal(
         # If no working_directory specified, get conductor's current directory
         if working_directory is None:
             try:
-                response = requests.get(
-                    f"{API_BASE_URL}/terminals/{current_terminal_id}/working-directory"
+                response = _api_get(
+                    f"/terminals/{current_terminal_id}/working-directory",
+                    timeout=WORKDIR_API_REQUEST_TIMEOUT,
                 )
-                if response.status_code == 200:
-                    working_directory = response.json().get("working_directory")
-                    logger.info(f"Inherited working directory from conductor: {working_directory}")
-                else:
-                    logger.warning(
-                        f"Failed to get conductor's working directory (status {response.status_code}), "
-                        "will use server default"
-                    )
+                working_directory = response.json().get("working_directory")
+                logger.info(f"Inherited working directory from conductor: {working_directory}")
             except Exception as e:
                 logger.warning(
                     f"Error fetching conductor's working directory: {e}, will use server default"
@@ -141,9 +211,7 @@ def _create_terminal(
         if child_allowed_tools:
             params["allowed_tools"] = child_allowed_tools
 
-        response = requests.post(f"{API_BASE_URL}/sessions/{session_name}/terminals", params=params)
-        response.raise_for_status()
-        terminal = response.json()
+        terminal = _api_post(f"/sessions/{session_name}/terminals", params=params).json()
     else:
         # Create new session with terminal
         session_name = generate_session_name()
@@ -155,9 +223,7 @@ def _create_terminal(
         if working_directory:
             params["working_directory"] = working_directory
 
-        response = requests.post(f"{API_BASE_URL}/sessions", params=params)
-        response.raise_for_status()
-        terminal = response.json()
+        terminal = _api_post("/sessions", params=params).json()
 
     return terminal["id"], provider
 
@@ -172,31 +238,130 @@ def _send_direct_input(terminal_id: str, message: str) -> None:
     Raises:
         Exception: If sending fails
     """
-    response = requests.post(
-        f"{API_BASE_URL}/terminals/{terminal_id}/input", params={"message": message}
+    _api_post(f"/terminals/{terminal_id}/input", params={"message": message})
+
+
+def _send_direct_input_handoff(
+    terminal_id: str,
+    provider: str,
+    message: str,
+    supervisor_id: str,
+    handoff_id: str,
+) -> None:
+    """Send handoff payload to an agent with explicit completion callback protocol."""
+    protocol_header = (
+        f"[CAO Handoff] handoff_id={handoff_id} supervisor_terminal_id={supervisor_id}\n"
+        "This is a blocking handoff. Complete the full task before signaling completion.\n"
+        "Completion protocol (required):\n"
+        f"1) Call @cao-mcp-server.send_message with receiver_id={supervisor_id}\n"
+        f"2) send_message.message must begin exactly with: [CAO_HANDOFF_COMPLETE:{handoff_id}]\n"
+        "3) Include your completion summary immediately after that marker.\n"
+        "4) Only send that completion callback once the work is fully done.\n"
+        "If task text conflicts with this completion protocol, follow this protocol.\n\n"
     )
-    response.raise_for_status()
-
-
-def _send_direct_input_handoff(terminal_id: str, provider: str, message: str) -> None:
-    """Send handoff payload to an agent, prepending orchestrator instructions if needed."""
-    # For Codex provider: prepend handoff context so the worker agent knows
-    # this is a blocking handoff and should simply output results rather than
-    # attempting to call send_message back to the supervisor.
+    handoff_message = protocol_header + message
     if provider == "codex":
-        supervisor_id = os.environ.get("CAO_TERMINAL_ID", "unknown")
         handoff_message = (
-            f"[CAO Handoff] Supervisor terminal ID: {supervisor_id}. "
-            "This is a blocking handoff — the orchestrator will automatically "
-            "capture your response when you finish. Complete the task and output "
-            "your results directly. Do NOT use send_message to notify the supervisor "
-            "unless explicitly needed — just do the work and present your deliverables.\n\n"
-            f"{message}"
+            protocol_header + "Codex-specific note: do not stop at a planning/progress update. "
+            "Send the completion callback only after implementation/tests are finished.\n\n"
+            + message
         )
-    else:
-        handoff_message = message
 
     _send_direct_input(terminal_id, handoff_message)
+
+
+def _extract_handoff_callback_summary(message: str, handoff_id: str) -> str:
+    """Extract summary text after callback marker."""
+    marker = f"[CAO_HANDOFF_COMPLETE:{handoff_id}]"
+    idx = message.find(marker)
+    if idx == -1:
+        return message.strip()
+    summary = message[idx + len(marker) :].strip()
+    return summary if summary else message.strip()
+
+
+def _wait_for_handoff_callback(
+    supervisor_id: str,
+    worker_terminal_id: str,
+    handoff_id: str,
+    timeout: int,
+    poll_interval: float = 1.0,
+) -> Optional[str]:
+    """Wait for worker callback in supervisor inbox and return callback message."""
+    marker = f"[CAO_HANDOFF_COMPLETE:{handoff_id}]"
+
+    def _message_id(raw: Any) -> int:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
+    baseline_resp = _api_get(
+        f"/terminals/{supervisor_id}/inbox/messages",
+        params={"limit": 100},
+    )
+    baseline_messages = baseline_resp.json() or []
+    baseline_max_id = max((_message_id(m.get("id")) for m in baseline_messages), default=0)
+    latest_seen_id = baseline_max_id
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        resp = _api_get(
+            f"/terminals/{supervisor_id}/inbox/messages",
+            params={"limit": 100},
+        )
+        messages = resp.json() or []
+        for msg in sorted(messages, key=lambda m: _message_id(m.get("id"))):
+            msg_id = _message_id(msg.get("id"))
+            if msg_id <= baseline_max_id or msg_id <= latest_seen_id:
+                continue
+            latest_seen_id = msg_id
+            if msg.get("sender_id") != worker_terminal_id:
+                continue
+            body = msg.get("message", "")
+            if isinstance(body, str) and marker in body:
+                return body
+
+        time.sleep(poll_interval)
+
+    return None
+
+
+def _cleanup_handoff_terminal(terminal_id: str, handoff_id: str, reason: str) -> None:
+    """Best-effort handoff worker cleanup: request exit then delete terminal/window."""
+    try:
+        _api_post(f"/terminals/{terminal_id}/exit")
+        logger.info(
+            "[handoff:%s] worker_exit_sent terminal_id=%s reason=%s",
+            handoff_id,
+            terminal_id,
+            reason,
+        )
+    except Exception as exit_error:
+        logger.warning(
+            "[handoff:%s] worker_exit_failed terminal_id=%s reason=%s error=%s",
+            handoff_id,
+            terminal_id,
+            reason,
+            exit_error,
+        )
+
+    try:
+        _api_delete(f"/terminals/{terminal_id}")
+        logger.info(
+            "[handoff:%s] worker_deleted terminal_id=%s reason=%s",
+            handoff_id,
+            terminal_id,
+            reason,
+        )
+    except Exception as delete_error:
+        logger.warning(
+            "[handoff:%s] worker_delete_failed terminal_id=%s reason=%s error=%s",
+            handoff_id,
+            terminal_id,
+            reason,
+            delete_error,
+        )
 
 
 def _send_direct_input_assign(terminal_id: str, message: str) -> None:
@@ -230,11 +395,10 @@ def _send_to_inbox(receiver_id: str, message: str) -> Dict[str, Any]:
     if not sender_id:
         raise ValueError("CAO_TERMINAL_ID not set - cannot determine sender")
 
-    response = requests.post(
-        f"{API_BASE_URL}/terminals/{receiver_id}/inbox/messages",
+    response = _api_post(
+        f"/terminals/{receiver_id}/inbox/messages",
         params={"sender_id": sender_id, "message": message},
     )
-    response.raise_for_status()
     return response.json()
 
 
@@ -244,10 +408,27 @@ async def _handoff_impl(
 ) -> HandoffResult:
     """Implementation of handoff logic."""
     start_time = time.time()
+    terminal_id: Optional[str] = None
+    handoff_id = uuid4().hex[:8]
+    supervisor_id = os.environ.get("CAO_TERMINAL_ID", "unknown")
+    logger.info(
+        "[handoff:%s] start supervisor=%s agent_profile=%s timeout=%ss working_directory=%s",
+        handoff_id,
+        supervisor_id,
+        agent_profile,
+        timeout,
+        working_directory,
+    )
 
     try:
         # Create terminal
         terminal_id, provider = _create_terminal(agent_profile, working_directory)
+        logger.info(
+            "[handoff:%s] worker_terminal_created terminal_id=%s provider=%s",
+            handoff_id,
+            terminal_id,
+            provider,
+        )
 
         # Wait for terminal to be ready (IDLE or COMPLETED) before sending
         # the handoff message. Accept COMPLETED in addition to IDLE because
@@ -267,6 +448,12 @@ async def _handoff_impl(
             {TerminalStatus.IDLE, TerminalStatus.COMPLETED},
             timeout=120.0,
         ):
+            logger.warning(
+                "[handoff:%s] worker_not_ready terminal_id=%s timeout=120s",
+                handoff_id,
+                terminal_id,
+            )
+            _cleanup_handoff_terminal(terminal_id, handoff_id, reason="worker_not_ready")
             return HandoffResult(
                 success=False,
                 message=f"Terminal {terminal_id} did not reach ready status within 120 seconds",
@@ -276,33 +463,73 @@ async def _handoff_impl(
 
         await asyncio.sleep(2)  # wait another 2s
 
-        # Send message to terminal (injects handoff instructions for codex if needed)
-        _send_direct_input_handoff(terminal_id, provider, message)
+        # Send message to terminal with callback protocol so completion is explicit
+        _send_direct_input_handoff(terminal_id, provider, message, supervisor_id, handoff_id)
+        logger.info("[handoff:%s] worker_input_sent terminal_id=%s", handoff_id, terminal_id)
 
-        # Monitor until completion with timeout
-        if not wait_until_terminal_status(
-            terminal_id, TerminalStatus.COMPLETED, timeout=timeout, polling_interval=1.0
-        ):
+        callback_message = _wait_for_handoff_callback(
+            supervisor_id,
+            terminal_id,
+            handoff_id,
+            timeout,
+        )
+        if callback_message is None:
+            timeout_output = None
+            try:
+                response = _api_get(f"/terminals/{terminal_id}/output", params={"mode": "last"})
+                timeout_output = response.json().get("output")
+            except Exception as output_error:
+                logger.warning(
+                    "[handoff:%s] failed_to_fetch_last_output terminal_id=%s error=%s",
+                    handoff_id,
+                    terminal_id,
+                    output_error,
+                )
+
+            logger.warning(
+                "[handoff:%s] callback_timeout terminal_id=%s timeout=%ss marker=%s",
+                handoff_id,
+                terminal_id,
+                timeout,
+                f"[CAO_HANDOFF_COMPLETE:{handoff_id}]",
+            )
+            if PRESERVE_TIMEOUT_HANDOFF_TERMINALS:
+                logger.info(
+                    "[handoff:%s] preserving_timed_out_worker terminal_id=%s",
+                    handoff_id,
+                    terminal_id,
+                )
+            else:
+                _cleanup_handoff_terminal(terminal_id, handoff_id, reason="callback_timeout")
+
             return HandoffResult(
                 success=False,
-                message=f"Handoff timed out after {timeout} seconds",
-                output=None,
+                message=(
+                    f"Handoff timed out after {timeout} seconds waiting for completion callback "
+                    f"[CAO_HANDOFF_COMPLETE:{handoff_id}]"
+                ),
+                output=timeout_output,
                 terminal_id=terminal_id,
             )
+        logger.info("[handoff:%s] callback_received terminal_id=%s", handoff_id, terminal_id)
 
-        # Get the response
-        response = requests.get(
-            f"{API_BASE_URL}/terminals/{terminal_id}/output", params={"mode": "last"}
+        output = _extract_handoff_callback_summary(callback_message, handoff_id)
+        logger.info(
+            "[handoff:%s] callback_summary_extracted terminal_id=%s output_chars=%d",
+            handoff_id,
+            terminal_id,
+            len(output) if output else 0,
         )
-        response.raise_for_status()
-        output_data = response.json()
-        output = output_data["output"]
 
-        # Send provider-specific exit command to cleanup terminal
-        response = requests.post(f"{API_BASE_URL}/terminals/{terminal_id}/exit")
-        response.raise_for_status()
+        _cleanup_handoff_terminal(terminal_id, handoff_id, reason="handoff_success")
 
         execution_time = time.time() - start_time
+        logger.info(
+            "[handoff:%s] success terminal_id=%s execution_time=%.2fs",
+            handoff_id,
+            terminal_id,
+            execution_time,
+        )
 
         return HandoffResult(
             success=True,
@@ -312,6 +539,9 @@ async def _handoff_impl(
         )
 
     except Exception as e:
+        if terminal_id:
+            _cleanup_handoff_terminal(terminal_id, handoff_id, reason="handoff_exception")
+        logger.exception("[handoff:%s] failure error=%s", handoff_id, e)
         return HandoffResult(
             success=False, message=f"Handoff failed: {str(e)}", output=None, terminal_id=None
         )
@@ -562,7 +792,10 @@ async def send_message(
 
 def main():
     """Main entry point for the MCP server."""
-    mcp.run()
+    # Disable FastMCP startup banner/update notices on stdio transport.
+    # Any non-protocol stdout can corrupt MCP framing and cause tool calls
+    # to hang without reaching server handlers.
+    mcp.run(show_banner=False)
 
 
 if __name__ == "__main__":

@@ -2,165 +2,183 @@
 
 import asyncio
 import os
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
-from cli_agent_orchestrator.mcp_server.server import _handoff_impl
+from cli_agent_orchestrator.mcp_server import server as mcp_server
 
 
-class TestHandoffMessageContext:
-    """Tests for handoff message context prepended to worker agents."""
+def test_send_direct_input_handoff_includes_callback_protocol_for_codex():
+    """Codex handoff messages should include callback protocol and codex guidance."""
+    with patch.object(mcp_server, "_send_direct_input") as mock_send:
+        mcp_server._send_direct_input_handoff(
+            terminal_id="worker-1",
+            provider="codex",
+            message="Implement hello world",
+            supervisor_id="supervisor-abc123",
+            handoff_id="deadbeef",
+        )
 
-    @patch("cli_agent_orchestrator.mcp_server.server._send_direct_input")
-    @patch("cli_agent_orchestrator.mcp_server.server.wait_until_terminal_status")
-    @patch("cli_agent_orchestrator.mcp_server.server._create_terminal")
-    def test_codex_provider_prepends_handoff_context(self, mock_create, mock_wait, mock_send):
-        """Codex provider should prepend [CAO Handoff] with supervisor ID."""
-        mock_create.return_value = ("dev-terminal-1", "codex")
-        # First call: wait for IDLE (True), second call: wait for COMPLETED (True)
-        mock_wait.side_effect = [True, True]
-        mock_send.return_value = None
+    mock_send.assert_called_once()
+    sent_message = mock_send.call_args[0][1]
+    assert sent_message.startswith("[CAO Handoff]")
+    assert "supervisor_terminal_id=supervisor-abc123" in sent_message
+    assert "[CAO_HANDOFF_COMPLETE:deadbeef]" in sent_message
+    assert "Codex-specific note" in sent_message
+    assert sent_message.endswith("Implement hello world")
 
-        with patch.dict(os.environ, {"CAO_TERMINAL_ID": "supervisor-abc123"}):
-            with patch("cli_agent_orchestrator.mcp_server.server.requests") as mock_requests:
-                mock_response = MagicMock()
-                mock_response.json.return_value = {"output": "task done"}
-                mock_response.raise_for_status.return_value = None
-                mock_requests.get.return_value = mock_response
-                mock_requests.post.return_value = mock_response
 
-                result = asyncio.get_event_loop().run_until_complete(
-                    _handoff_impl("developer", "Implement hello world")
-                )
+def test_send_direct_input_handoff_for_non_codex_still_includes_callback_protocol():
+    """Non-codex providers should still receive the required callback protocol header."""
+    with patch.object(mcp_server, "_send_direct_input") as mock_send:
+        mcp_server._send_direct_input_handoff(
+            terminal_id="worker-2",
+            provider="claude_code",
+            message="Review this change",
+            supervisor_id="supervisor-xyz789",
+            handoff_id="cafebabe",
+        )
 
-        # Verify _send_direct_input was called with the handoff prefix
-        mock_send.assert_called_once()
-        sent_message = mock_send.call_args[0][1]
-        assert sent_message.startswith("[CAO Handoff]")
-        assert "supervisor-abc123" in sent_message
-        assert "Implement hello world" in sent_message
-        assert "Do NOT use send_message" in sent_message
+    mock_send.assert_called_once()
+    sent_message = mock_send.call_args[0][1]
+    assert sent_message.startswith("[CAO Handoff]")
+    assert "supervisor_terminal_id=supervisor-xyz789" in sent_message
+    assert "[CAO_HANDOFF_COMPLETE:cafebabe]" in sent_message
+    assert "Codex-specific note" not in sent_message
+    assert sent_message.endswith("Review this change")
 
-    @patch("cli_agent_orchestrator.mcp_server.server._send_direct_input")
-    @patch("cli_agent_orchestrator.mcp_server.server.wait_until_terminal_status")
-    @patch("cli_agent_orchestrator.mcp_server.server._create_terminal")
-    def test_claude_code_provider_no_handoff_context(self, mock_create, mock_wait, mock_send):
-        """Claude Code provider should NOT prepend any handoff context."""
-        mock_create.return_value = ("dev-terminal-2", "claude_code")
-        mock_wait.side_effect = [True, True]
-        mock_send.return_value = None
 
-        with patch("cli_agent_orchestrator.mcp_server.server.requests") as mock_requests:
-            mock_response = MagicMock()
-            mock_response.json.return_value = {"output": "task done"}
-            mock_response.raise_for_status.return_value = None
-            mock_requests.get.return_value = mock_response
-            mock_requests.post.return_value = mock_response
+def test_extract_handoff_callback_summary_removes_marker():
+    """Marker-prefixed callback messages should return only summary content."""
+    summary = mcp_server._extract_handoff_callback_summary(
+        message="[CAO_HANDOFF_COMPLETE:1234abcd] Files changed: x.py",
+        handoff_id="1234abcd",
+    )
 
-            result = asyncio.get_event_loop().run_until_complete(
-                _handoff_impl("developer", "Implement hello world")
-            )
+    assert summary == "Files changed: x.py"
 
-        # Verify message was sent unchanged
-        mock_send.assert_called_once()
-        sent_message = mock_send.call_args[0][1]
-        assert sent_message == "Implement hello world"
 
-    @patch("cli_agent_orchestrator.mcp_server.server._send_direct_input")
-    @patch("cli_agent_orchestrator.mcp_server.server.wait_until_terminal_status")
-    @patch("cli_agent_orchestrator.mcp_server.server._create_terminal")
-    def test_kiro_cli_provider_no_handoff_context(self, mock_create, mock_wait, mock_send):
-        """Kiro CLI provider should NOT prepend any handoff context."""
-        mock_create.return_value = ("dev-terminal-3", "kiro_cli")
-        mock_wait.side_effect = [True, True]
-        mock_send.return_value = None
+def test_handoff_impl_success_uses_callback_and_exits_worker():
+    """Handoff should succeed only after callback marker is received."""
+    fake_uuid = MagicMock()
+    fake_uuid.hex = "deadbeefcafebabe"
 
-        with patch("cli_agent_orchestrator.mcp_server.server.requests") as mock_requests:
-            mock_response = MagicMock()
-            mock_response.json.return_value = {"output": "task done"}
-            mock_response.raise_for_status.return_value = None
-            mock_requests.get.return_value = mock_response
-            mock_requests.post.return_value = mock_response
-
-            result = asyncio.get_event_loop().run_until_complete(
-                _handoff_impl("developer", "Implement hello world")
-            )
-
-        mock_send.assert_called_once()
-        sent_message = mock_send.call_args[0][1]
-        assert sent_message == "Implement hello world"
-
-    @patch("cli_agent_orchestrator.mcp_server.server._send_direct_input")
-    @patch("cli_agent_orchestrator.mcp_server.server.wait_until_terminal_status")
-    @patch("cli_agent_orchestrator.mcp_server.server._create_terminal")
-    def test_codex_handoff_context_includes_supervisor_id_from_env(
-        self, mock_create, mock_wait, mock_send
+    with (
+        patch.object(mcp_server, "_create_terminal", return_value=("dev-terminal-1", "codex")),
+        patch.object(mcp_server, "wait_until_terminal_status", return_value=True),
+        patch.object(mcp_server, "_send_direct_input_handoff") as mock_send_handoff,
+        patch.object(
+            mcp_server,
+            "_wait_for_handoff_callback",
+            return_value="[CAO_HANDOFF_COMPLETE:deadbeef] completed summary",
+        ) as mock_wait_callback,
+        patch.object(
+            mcp_server,
+            "_extract_handoff_callback_summary",
+            return_value="completed summary",
+        ) as mock_extract_summary,
+        patch.object(mcp_server, "_cleanup_handoff_terminal") as mock_cleanup,
+        patch.object(mcp_server, "uuid4", return_value=fake_uuid),
+        patch.object(mcp_server.asyncio, "sleep", new=AsyncMock()),
+        patch.dict(os.environ, {"CAO_TERMINAL_ID": "supervisor-abc123"}),
     ):
-        """Supervisor terminal ID should come from CAO_TERMINAL_ID env var."""
-        mock_create.return_value = ("dev-terminal-4", "codex")
-        mock_wait.side_effect = [True, True]
-        mock_send.return_value = None
+        result = asyncio.run(
+            mcp_server._handoff_impl("developer", "Implement feature", timeout=120)
+        )
 
-        with patch.dict(os.environ, {"CAO_TERMINAL_ID": "sup-xyz789"}):
-            with patch("cli_agent_orchestrator.mcp_server.server.requests") as mock_requests:
-                mock_response = MagicMock()
-                mock_response.json.return_value = {"output": "done"}
-                mock_response.raise_for_status.return_value = None
-                mock_requests.get.return_value = mock_response
-                mock_requests.post.return_value = mock_response
+    assert result.success is True
+    assert result.output == "completed summary"
+    assert result.terminal_id == "dev-terminal-1"
+    assert "Successfully handed off" in result.message
 
-                asyncio.get_event_loop().run_until_complete(
-                    _handoff_impl("developer", "Build feature X")
-                )
+    mock_send_handoff.assert_called_once_with(
+        "dev-terminal-1",
+        "codex",
+        "Implement feature",
+        "supervisor-abc123",
+        "deadbeef",
+    )
+    mock_wait_callback.assert_called_once_with(
+        "supervisor-abc123", "dev-terminal-1", "deadbeef", 120
+    )
+    mock_extract_summary.assert_called_once_with(
+        "[CAO_HANDOFF_COMPLETE:deadbeef] completed summary",
+        "deadbeef",
+    )
+    mock_cleanup.assert_called_once_with("dev-terminal-1", "deadbeef", reason="handoff_success")
 
-        sent_message = mock_send.call_args[0][1]
-        assert "sup-xyz789" in sent_message
-        assert "Build feature X" in sent_message
 
-    @patch("cli_agent_orchestrator.mcp_server.server._send_direct_input")
-    @patch("cli_agent_orchestrator.mcp_server.server.wait_until_terminal_status")
-    @patch("cli_agent_orchestrator.mcp_server.server._create_terminal")
-    def test_codex_handoff_context_fallback_when_no_env(self, mock_create, mock_wait, mock_send):
-        """When CAO_TERMINAL_ID is not set, supervisor ID should be 'unknown'."""
-        mock_create.return_value = ("dev-terminal-5", "codex")
-        mock_wait.side_effect = [True, True]
-        mock_send.return_value = None
+def test_handoff_impl_times_out_waiting_for_callback_and_returns_last_output():
+    """If callback never arrives, handoff should fail with timeout and include last worker output."""
+    fake_uuid = MagicMock()
+    fake_uuid.hex = "deadbeefcafebabe"
+    output_response = MagicMock()
+    output_response.json.return_value = {"output": "partial progress update"}
 
-        with patch.dict(os.environ, {}, clear=True):
-            with patch("cli_agent_orchestrator.mcp_server.server.requests") as mock_requests:
-                mock_response = MagicMock()
-                mock_response.json.return_value = {"output": "done"}
-                mock_response.raise_for_status.return_value = None
-                mock_requests.get.return_value = mock_response
-                mock_requests.post.return_value = mock_response
+    with (
+        patch.object(mcp_server, "_create_terminal", return_value=("dev-terminal-2", "codex")),
+        patch.object(mcp_server, "wait_until_terminal_status", return_value=True),
+        patch.object(mcp_server, "_send_direct_input_handoff"),
+        patch.object(mcp_server, "_wait_for_handoff_callback", return_value=None),
+        patch.object(mcp_server, "_api_get", return_value=output_response),
+        patch.object(mcp_server, "_cleanup_handoff_terminal") as mock_cleanup,
+        patch.object(mcp_server, "PRESERVE_TIMEOUT_HANDOFF_TERMINALS", False),
+        patch.object(mcp_server, "uuid4", return_value=fake_uuid),
+        patch.object(mcp_server.asyncio, "sleep", new=AsyncMock()),
+        patch.dict(os.environ, {"CAO_TERMINAL_ID": "supervisor-abc123"}),
+    ):
+        result = asyncio.run(mcp_server._handoff_impl("developer", "Implement feature", timeout=60))
 
-                asyncio.get_event_loop().run_until_complete(_handoff_impl("developer", "Do task"))
+    assert result.success is False
+    assert result.terminal_id == "dev-terminal-2"
+    assert result.output == "partial progress update"
+    assert "timed out after 60 seconds" in result.message
+    assert "[CAO_HANDOFF_COMPLETE:deadbeef]" in result.message
+    mock_cleanup.assert_called_once_with("dev-terminal-2", "deadbeef", reason="callback_timeout")
 
-        sent_message = mock_send.call_args[0][1]
-        assert "unknown" in sent_message
-        assert "[CAO Handoff]" in sent_message
-        assert "Do task" in sent_message
 
-    @patch("cli_agent_orchestrator.mcp_server.server._send_direct_input")
-    @patch("cli_agent_orchestrator.mcp_server.server.wait_until_terminal_status")
-    @patch("cli_agent_orchestrator.mcp_server.server._create_terminal")
-    def test_codex_handoff_original_message_preserved(self, mock_create, mock_wait, mock_send):
-        """Original message should appear in full after the handoff prefix."""
-        mock_create.return_value = ("dev-terminal-6", "codex")
-        mock_wait.side_effect = [True, True]
-        mock_send.return_value = None
+def test_handoff_impl_timeout_preserves_worker_when_configured():
+    """Timeout cleanup should be skipped when preserve-timeout flag is enabled."""
+    fake_uuid = MagicMock()
+    fake_uuid.hex = "deadbeefcafebabe"
+    output_response = MagicMock()
+    output_response.json.return_value = {"output": "partial progress update"}
 
-        original = "Implement the task described in /path/to/task.md. Write tests."
-        with patch.dict(os.environ, {"CAO_TERMINAL_ID": "sup-111"}):
-            with patch("cli_agent_orchestrator.mcp_server.server.requests") as mock_requests:
-                mock_response = MagicMock()
-                mock_response.json.return_value = {"output": "done"}
-                mock_response.raise_for_status.return_value = None
-                mock_requests.get.return_value = mock_response
-                mock_requests.post.return_value = mock_response
+    with (
+        patch.object(mcp_server, "_create_terminal", return_value=("dev-terminal-9", "codex")),
+        patch.object(mcp_server, "wait_until_terminal_status", return_value=True),
+        patch.object(mcp_server, "_send_direct_input_handoff"),
+        patch.object(mcp_server, "_wait_for_handoff_callback", return_value=None),
+        patch.object(mcp_server, "_api_get", return_value=output_response),
+        patch.object(mcp_server, "_cleanup_handoff_terminal") as mock_cleanup,
+        patch.object(mcp_server, "PRESERVE_TIMEOUT_HANDOFF_TERMINALS", True),
+        patch.object(mcp_server, "uuid4", return_value=fake_uuid),
+        patch.object(mcp_server.asyncio, "sleep", new=AsyncMock()),
+        patch.dict(os.environ, {"CAO_TERMINAL_ID": "supervisor-abc123"}),
+    ):
+        result = asyncio.run(mcp_server._handoff_impl("developer", "Implement feature", timeout=60))
 
-                asyncio.get_event_loop().run_until_complete(_handoff_impl("developer", original))
+    assert result.success is False
+    assert result.terminal_id == "dev-terminal-9"
+    mock_cleanup.assert_not_called()
 
-        sent_message = mock_send.call_args[0][1]
-        assert sent_message.endswith(original)
+
+def test_handoff_impl_fails_when_worker_never_reaches_ready_status():
+    """If worker never reaches IDLE/COMPLETED readiness, handoff should fail early."""
+    fake_uuid = MagicMock()
+    fake_uuid.hex = "deadbeefcafebabe"
+
+    with (
+        patch.object(mcp_server, "_create_terminal", return_value=("dev-terminal-3", "codex")),
+        patch.object(mcp_server, "wait_until_terminal_status", return_value=False),
+        patch.object(mcp_server, "_send_direct_input_handoff") as mock_send_handoff,
+        patch.object(mcp_server, "_cleanup_handoff_terminal") as mock_cleanup,
+        patch.object(mcp_server, "uuid4", return_value=fake_uuid),
+    ):
+        result = asyncio.run(mcp_server._handoff_impl("developer", "Do work"))
+
+    assert result.success is False
+    assert result.terminal_id == "dev-terminal-3"
+    assert "did not reach ready status" in result.message
+    assert result.output is None
+    mock_send_handoff.assert_not_called()
+    mock_cleanup.assert_called_once_with("dev-terminal-3", "deadbeef", reason="worker_not_ready")

@@ -1,6 +1,8 @@
 ---
 name: code_supervisor
 description: Coding Supervisor Agent in a multi-agent system
+model: gpt-5.3-codex
+model_reasoning_effort: high
 role: supervisor  # @cao-mcp-server, fs_read, fs_list. For fine-grained control, see docs/tool-restrictions.md
 mcpServers:
   cao-mcp-server:

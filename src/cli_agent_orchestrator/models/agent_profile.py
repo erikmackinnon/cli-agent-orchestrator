@@ -35,3 +35,5 @@ class AgentProfile(BaseModel):
     hooks: Optional[Dict[str, Any]] = None
     useLegacyMcpJson: Optional[bool] = None
     model: Optional[str] = None
+    model_reasoning_effort: Optional[str] = None
+    model_verbosity: Optional[str] = None

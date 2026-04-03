@@ -75,6 +75,9 @@ class TestCodexBuildCommand:
         mock_profile = MagicMock()
         mock_profile.system_prompt = "You are a code supervisor agent."
         mock_profile.mcpServers = None
+        mock_profile.model = None
+        mock_profile.model_reasoning_effort = None
+        mock_profile.model_verbosity = None
         mock_load_profile.return_value = mock_profile
 
         provider = CodexProvider("test1234", "test-session", "window-0", "code_supervisor")
@@ -91,6 +94,9 @@ class TestCodexBuildCommand:
         mock_profile = MagicMock()
         mock_profile.system_prompt = 'Use "double quotes" carefully.'
         mock_profile.mcpServers = None
+        mock_profile.model = None
+        mock_profile.model_reasoning_effort = None
+        mock_profile.model_verbosity = None
         mock_load_profile.return_value = mock_profile
 
         provider = CodexProvider("test1234", "test-session", "window-0", "test_agent")
@@ -103,6 +109,9 @@ class TestCodexBuildCommand:
         mock_profile = MagicMock()
         mock_profile.system_prompt = "Line one.\nLine two.\n\n## Section\n- Item"
         mock_profile.mcpServers = None
+        mock_profile.model = None
+        mock_profile.model_reasoning_effort = None
+        mock_profile.model_verbosity = None
         mock_load_profile.return_value = mock_profile
 
         provider = CodexProvider("test1234", "test-session", "window-0", "test_agent")
@@ -124,6 +133,9 @@ class TestCodexBuildCommand:
                 "args": ["--from", "git+https://example.com/repo.git@main", "cao-mcp-server"],
             }
         }
+        mock_profile.model = None
+        mock_profile.model_reasoning_effort = None
+        mock_profile.model_verbosity = None
         mock_load_profile.return_value = mock_profile
 
         provider = CodexProvider("test1234", "test-session", "window-0", "code_supervisor")
@@ -136,8 +148,8 @@ class TestCodexBuildCommand:
         # CAO_TERMINAL_ID must be forwarded for handoff to work
         assert "mcp_servers.cao-mcp-server.env_vars=" in command
         assert "CAO_TERMINAL_ID" in command
-        # Tool timeout must be a TOML float (600.0) for Codex's f64 deserializer
-        assert "mcp_servers.cao-mcp-server.tool_timeout_sec=600.0" in command
+        # Tool timeout must be a TOML float (1200.0) for Codex's f64 deserializer
+        assert "mcp_servers.cao-mcp-server.tool_timeout_sec=1200.0" in command
 
     @patch("cli_agent_orchestrator.providers.codex.load_agent_profile")
     def test_build_command_with_mcp_servers_env(self, mock_load_profile):
@@ -150,6 +162,9 @@ class TestCodexBuildCommand:
                 "env": {"API_KEY": "secret123"},
             }
         }
+        mock_profile.model = None
+        mock_profile.model_reasoning_effort = None
+        mock_profile.model_verbosity = None
         mock_load_profile.return_value = mock_profile
 
         provider = CodexProvider("test1234", "test-session", "window-0", "test_agent")
@@ -173,6 +188,9 @@ class TestCodexBuildCommand:
                 "env_vars": ["HOME", "PATH"],
             }
         }
+        mock_profile.model = None
+        mock_profile.model_reasoning_effort = None
+        mock_profile.model_verbosity = None
         mock_load_profile.return_value = mock_profile
 
         provider = CodexProvider("test1234", "test-session", "window-0", "test_agent")
@@ -188,6 +206,9 @@ class TestCodexBuildCommand:
         mock_profile = MagicMock()
         mock_profile.system_prompt = ""
         mock_profile.mcpServers = None
+        mock_profile.model = None
+        mock_profile.model_reasoning_effort = None
+        mock_profile.model_verbosity = None
         mock_load_profile.return_value = mock_profile
 
         provider = CodexProvider("test1234", "test-session", "window-0", "empty_agent")
@@ -201,6 +222,9 @@ class TestCodexBuildCommand:
         mock_profile = MagicMock()
         mock_profile.system_prompt = None
         mock_profile.mcpServers = None
+        mock_profile.model = None
+        mock_profile.model_reasoning_effort = None
+        mock_profile.model_verbosity = None
         mock_load_profile.return_value = mock_profile
 
         provider = CodexProvider("test1234", "test-session", "window-0", "none_agent")
@@ -230,6 +254,9 @@ class TestCodexBuildCommand:
         mock_profile = MagicMock()
         mock_profile.system_prompt = "You are a supervisor."
         mock_profile.mcpServers = None
+        mock_profile.model = None
+        mock_profile.model_reasoning_effort = None
+        mock_profile.model_verbosity = None
         mock_load_profile.return_value = mock_profile
 
         provider = CodexProvider("test1234", "test-session", "window-0", "code_supervisor")
@@ -240,6 +267,23 @@ class TestCodexBuildCommand:
         codex_call = mock_tmux.send_keys.call_args_list[1]
         assert "developer_instructions=" in codex_call.args[2]
         assert "You are a supervisor." in codex_call.args[2]
+
+    @patch("cli_agent_orchestrator.providers.codex.load_agent_profile")
+    def test_build_command_with_model_and_reasoning_overrides(self, mock_load_profile):
+        mock_profile = MagicMock()
+        mock_profile.system_prompt = ""
+        mock_profile.mcpServers = None
+        mock_profile.model = "gpt-5.3-codex-spark"
+        mock_profile.model_reasoning_effort = "high"
+        mock_profile.model_verbosity = "low"
+        mock_load_profile.return_value = mock_profile
+
+        provider = CodexProvider("test1234", "test-session", "window-0", "codex_reviewer")
+        command = provider._build_codex_command()
+
+        assert "-m gpt-5.3-codex-spark" in command
+        assert 'model_reasoning_effort="high"' in command
+        assert 'model_verbosity="low"' in command
 
 
 class TestCodexProviderStatusDetection:
@@ -628,6 +672,42 @@ class TestCodexBulletFormatStatusDetection:
 
         assert status == TerminalStatus.PROCESSING
 
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_processing_tui_spinner_minute_duration(self, mock_tmux):
+        """PROCESSING when TUI spinner duration includes minutes."""
+        mock_tmux.get_history.return_value = (
+            "› [CAO Handoff] Do the task.\n"
+            "\n"
+            "• Working (1m 19s • esc to interrupt)\n"
+            "\n"
+            "› Use /skills to list available skills\n"
+            "\n"
+            "  ? for shortcuts                     100% context left\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.PROCESSING
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_processing_tool_call_header(self, mock_tmux):
+        """PROCESSING when Codex shows active MCP tool call header."""
+        mock_tmux.get_history.return_value = (
+            "› Implement the feature\n"
+            "• Calling\n"
+            "  └ cao-mcp-server.handoff({\"agent_profile\":\"developer\"})\n"
+            "\n"
+            "› Find and fix a bug in @filename\n"
+            "\n"
+            "  gpt-5.3-codex high · 88% left · ~/project\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.PROCESSING
+
 
 class TestCodexV0111FooterFormat:
     """Tests for Codex v0.111.0+ TUI footer format.
@@ -713,6 +793,23 @@ class TestCodexV0111FooterFormat:
         status = provider.get_status()
 
         assert status == TerminalStatus.PROCESSING
+
+    @patch("cli_agent_orchestrator.providers.codex.tmux_client")
+    def test_get_status_completed_usage_quota_footer(self, mock_tmux):
+        """COMPLETED when footer uses usage/quota format instead of '% left'."""
+        mock_tmux.get_history.return_value = (
+            "› implement test hardening\n"
+            "• Per the blocking handoff header, results are provided directly here.\n"
+            "\n"
+            "› Find and fix a bug in @filename\n"
+            "\n"
+            "  gpt-5.3-codex high · 28% used · 5h 91% · weekly 94% · 258K window · 1.05M used\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        status = provider.get_status()
+
+        assert status == TerminalStatus.COMPLETED
 
 
 class TestCodexProviderMessageExtraction:
@@ -894,6 +991,23 @@ class TestCodexV0111Extraction:
 
         assert "I've fixed the issue" in message
         assert "Find and fix a bug" not in message
+
+    def test_extract_usage_quota_footer(self):
+        """Extract response when footer uses usage/quota format."""
+        output = (
+            "› implement test hardening\n"
+            "• Per the blocking handoff header, results are provided directly here.\n"
+            "\n"
+            "› Find and fix a bug in @filename\n"
+            "\n"
+            "  gpt-5.3-codex high · 28% used · 5h 91% · weekly 94% · 258K window · 1.05M used\n"
+        )
+
+        provider = CodexProvider("test1234", "test-session", "window-0")
+        message = provider.extract_last_message_from_script(output)
+
+        assert "blocking handoff header" in message.lower()
+        assert "gpt-5.3-codex high · 28% used" not in message
 
 
 class TestCodexProviderMisc:
