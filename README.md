@@ -4,6 +4,31 @@
 
 CLI Agent Orchestrator(CAO, pronounced as "kay-oh"), is a lightweight orchestration system for managing multiple AI agent sessions in tmux terminals. Enables Multi-agent collaboration via MCP server.
 
+## Rolling Updates (Fork + Upstream)
+
+This section is a quick running log of notable changes in this fork and synced upstream improvements.
+
+### Fork Improvements
+
+- **2026-04-03**: Robust `handoff` completion protocol for MCP orchestration:
+  - moved from first-`COMPLETED` detection to explicit callback marker (`CAO_HANDOFF_COMPLETE`)
+  - added safer worker cleanup (`/exit` + terminal delete) with timeout-preserve toggle
+  - hardened MCP API calls with bounded request timeouts and clearer timeout errors
+- **2026-04-03**: Codex profile controls:
+  - added profile support for `model`, `model_reasoning_effort`, and `model_verbosity`
+  - improved active-tool-call/status detection and default MCP tool timeout handling
+- **2026-04-03**: Inbox delivery hardening for Codex:
+  - skip inbox delivery while active tool-call markers are present
+  - expanded delivery logging context (`sender`, `message_id`, `status`)
+
+### Upstream Sync Highlights
+
+- **2026-04-03**: Synced fixes from upstream `main`:
+  - Kiro new TUI fallback patterns + profile loading exception handling improvements
+  - Claude waiting-state regex fix for stale scrollback false positives
+  - security fix to honor child `allowedTools=["*"]` behavior
+  - launch UX updates including `--auto-approve` and clearer restriction prompts
+
 ## Hierarchical Multi-Agent System
 
 CLI Agent Orchestrator (CAO) implements a hierarchical multi-agent system that enables complex problem-solving through specialized division of CLI Developer Agents.

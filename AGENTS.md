@@ -41,3 +41,11 @@ Recent history favors Conventional Commits (for example, `feat(codex): ...`, `fi
 - `type(scope): concise summary`
 
 PRs should be focused, linked to an issue for significant work, include test evidence, and resolve CI failures before merge. Avoid unrelated refactors in the same PR.
+
+## Rolling README Update Rule
+When you land meaningful code changes, update `README.md` under `## Rolling Updates (Fork + Upstream)` in the same PR/commit set.
+
+- Add one concise bullet under `### Fork Improvements` for local features/fixes.
+- Add one concise bullet under `### Upstream Sync Highlights` when cherry-picking or merging upstream changes.
+- Include date (`YYYY-MM-DD`) and plain-language impact (what changed, why it matters).
+- Keep entries high-signal; skip trivial churn (format-only edits, typo-only docs).
