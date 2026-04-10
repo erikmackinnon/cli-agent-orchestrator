@@ -10,6 +10,9 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-10**: Caught fork up to latest upstream while preserving Codex-provider behavior:
+  - merged upstream `main` and resolved lockfile conflict without regressing fork-specific Codex logic
+  - validated Codex status/extraction/profile behavior with focused provider + agent-profile test suites
 - **2026-04-03**: Added `codex_debugger` agent profile for focused bug triage and remediation:
   - configured to `model: gpt-5.3-codex` with `model_reasoning_effort: high`
   - codified repro → root-cause → minimal-fix → validation workflow
@@ -26,6 +29,10 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Upstream Sync Highlights
 
+- **2026-04-10**: Synced upstream `main` updates for provider onboarding, reliability, and UI polish:
+  - added `cao-provider` SKILL.md scaffolding guide for implementing new CLI providers
+  - improved `/providers` API completeness, Web terminal scroll/paste reliability, and Kiro full-TUI support
+  - bumped `cryptography` and `vite` to pick up dependency/security maintenance updates
 - **2026-04-03**: Synced fixes from upstream `main`:
   - Kiro new TUI fallback patterns + profile loading exception handling improvements
   - Claude waiting-state regex fix for stale scrollback false positives
