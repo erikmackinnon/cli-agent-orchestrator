@@ -43,3 +43,6 @@ work/
 
 # Memory
 context/
+
+# Worktrees
+.worktrees
