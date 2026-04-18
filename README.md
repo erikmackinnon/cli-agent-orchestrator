@@ -10,6 +10,9 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-18**: Synced upstream safely while deferring plugin-integration conflict:
+  - cherry-picked 10 upstream commits and intentionally held back external-plugin commit `d472f64` for a dedicated follow-up merge
+  - preserved fork-specific handoff callback behavior while still taking latest stability and test fixes
 - **2026-04-10**: Caught fork up to latest upstream while preserving Codex-provider behavior:
   - merged upstream `main` and resolved lockfile conflict without regressing fork-specific Codex logic
   - validated Codex status/extraction/profile behavior with focused provider + agent-profile test suites
@@ -29,6 +32,9 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Upstream Sync Highlights
 
+- **2026-04-18**: Cherry-picked upstream commits for skills, packaging, provider reliability, and terminal resilience:
+  - added managed skills support (`cao skills`), wheel-bundled WebUI assets, and dependency bumps (`pytest`, `python-multipart`, `authlib`)
+  - adopted Claude processing-state robustness fixes and missing-agent-profile handling in terminal service
 - **2026-04-10**: Synced upstream `main` updates for provider onboarding, reliability, and UI polish:
   - added `cao-provider` SKILL.md scaffolding guide for implementing new CLI providers
   - improved `/providers` API completeness, Web terminal scroll/paste reliability, and Kiro full-TUI support
