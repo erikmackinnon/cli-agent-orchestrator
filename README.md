@@ -10,6 +10,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-18**: Integrated upstream external plugin framework while preserving fork handoff semantics:
+  - merged plugin lifecycle/event dispatch infrastructure and kept explicit handoff callback protocol behavior
 - **2026-04-18**: Synced upstream safely while deferring plugin-integration conflict:
   - cherry-picked 10 upstream commits and intentionally held back external-plugin commit `d472f64` for a dedicated follow-up merge
   - preserved fork-specific handoff callback behavior while still taking latest stability and test fixes
@@ -32,6 +34,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Upstream Sync Highlights
 
+- **2026-04-18**: Synced upstream external plugin support (`d472f64`) after conflict-resolution review:
+  - added plugin registry/events/dispatch services, plugin docs/skill references, and Discord example plugin scaffold
 - **2026-04-18**: Cherry-picked upstream commits for skills, packaging, provider reliability, and terminal resilience:
   - added managed skills support (`cao skills`), wheel-bundled WebUI assets, and dependency bumps (`pytest`, `python-multipart`, `authlib`)
   - adopted Claude processing-state robustness fixes and missing-agent-profile handling in terminal service
