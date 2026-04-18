@@ -13,6 +13,7 @@ from pydantic import Field
 
 from cli_agent_orchestrator.constants import API_BASE_URL, DEFAULT_PROVIDER
 from cli_agent_orchestrator.mcp_server.models import HandoffResult
+from cli_agent_orchestrator.models.inbox import OrchestrationType
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.utils.terminal import generate_session_name, wait_until_terminal_status
 
@@ -243,17 +244,27 @@ def _create_terminal(
     return terminal["id"], provider
 
 
-def _send_direct_input(terminal_id: str, message: str) -> None:
+def _send_direct_input(
+    terminal_id: str, message: str, orchestration_type: OrchestrationType
+) -> None:
     """Send input directly to a terminal (bypasses inbox).
 
     Args:
         terminal_id: Terminal ID
         message: Message to send
+        orchestration_type: Orchestration mode for plugin event emission
 
     Raises:
         Exception: If sending fails
     """
-    _api_post(f"/terminals/{terminal_id}/input", params={"message": message})
+    _api_post(
+        f"/terminals/{terminal_id}/input",
+        params={
+            "message": message,
+            "sender_id": os.environ.get("CAO_TERMINAL_ID", "supervisor"),
+            "orchestration_type": orchestration_type,
+        },
+    )
 
 
 def _send_direct_input_handoff(
@@ -282,7 +293,7 @@ def _send_direct_input_handoff(
             + message
         )
 
-    _send_direct_input(terminal_id, handoff_message)
+    _send_direct_input(terminal_id, handoff_message, OrchestrationType.HANDOFF)
 
 
 def _extract_handoff_callback_summary(message: str, handoff_id: str) -> str:
@@ -389,7 +400,7 @@ def _send_direct_input_assign(terminal_id: str, message: str) -> None:
             f"When done, send results back to terminal {sender_id} using send_message]"
         )
 
-    _send_direct_input(terminal_id, message)
+    _send_direct_input(terminal_id, message, OrchestrationType.ASSIGN)
 
 
 def _send_to_inbox(receiver_id: str, message: str) -> Dict[str, Any]:
