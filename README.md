@@ -12,6 +12,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 - **2026-04-20**: Fixed orchestration callback ingestion for terminal-wrapped completion markers:
   - callback extraction now canonicalizes wrapped `⟦CAO-EVENT-v1:<base64url-json>⟧` markers by stripping in-marker whitespace before strict framing/base64/json validation, so wrapped worker completions are ingested into durable lifecycle events instead of leaving runs stuck `running`
+- **2026-04-20**: Hardened orchestration callback recovery for exited workers:
+  - callback extraction now strips ANSI escape sequences found in real tmux logs, and active-run maintenance now continuously reconciles running attempts (including a full-log recovery pass before `terminal_missing` failure) so exited workers without live callbacks no longer leave runs hanging indefinitely
 - **2026-04-20**: Fixed orchestration worker prompt delivery during attempt start:
   - `_start_attempt()` now sends each queued `job.message` into the newly created worker terminal via the existing terminal input path, and treats post-spawn input-delivery failures as attempt-start failures with deterministic terminal cleanup and failed job/attempt lifecycle events
 - **2026-04-18**: Completed orchestration recovery/reaper and Codex starter proof (W13/W16/W17):

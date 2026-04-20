@@ -547,6 +547,8 @@ class OrchestrationService:
             self._reap_terminal_run(run=run)
             return
 
+        # Reconcile active attempts continuously so exited worker terminals do not strand runs.
+        self._reconcile_run_attempts(run_id=run_id, ingest_logs=True)
         self._reconcile_timeouts(run_id=run_id)
         self._release_terminal_links_for_completed_attempts(run_id=run_id)
         self._schedule_run(run_id=run_id)
@@ -851,12 +853,42 @@ class OrchestrationService:
                 continue
 
             terminal_id = attempt.terminal_id
-            if not terminal_id or not self._terminal_exists(terminal_id):
-                self._mark_attempt_terminal_missing(run_id=run_id, job=job, attempt=attempt)
+            if ingest_logs and terminal_id:
+                self._ingest_terminal_log(terminal_id=terminal_id)
+                refreshed_attempt = self._store.get_attempt(attempt_id=attempt.attempt_id)
+                refreshed_job = self._store.get_job(job_id=job.job_id)
+                if refreshed_attempt is not None:
+                    attempt = refreshed_attempt
+                if refreshed_job is not None:
+                    job = refreshed_job
+
+            if self._status_value(job.status) != JobStatus.RUNNING.value:
+                continue
+            if self._status_value(attempt.status) != AttemptStatus.RUNNING.value:
                 continue
 
-            if ingest_logs:
-                self._ingest_terminal_log(terminal_id=terminal_id)
+            terminal_id = attempt.terminal_id
+            if terminal_id and self._terminal_exists(terminal_id):
+                continue
+
+            # If the worker terminal is gone, perform one full-log recovery pass
+            # before failing the attempt. This recovers markers that were missed by
+            # prior incremental parsing/offset state.
+            if ingest_logs and terminal_id:
+                self._ingest_terminal_log(terminal_id=terminal_id, full_scan=True)
+                refreshed_attempt = self._store.get_attempt(attempt_id=attempt.attempt_id)
+                refreshed_job = self._store.get_job(job_id=job.job_id)
+                if refreshed_attempt is not None:
+                    attempt = refreshed_attempt
+                if refreshed_job is not None:
+                    job = refreshed_job
+
+            if self._status_value(job.status) != JobStatus.RUNNING.value:
+                continue
+            if self._status_value(attempt.status) != AttemptStatus.RUNNING.value:
+                continue
+
+            self._mark_attempt_terminal_missing(run_id=run_id, job=job, attempt=attempt)
 
     def _mark_attempt_terminal_missing(
         self, *, run_id: str, job: JobRecord, attempt: AttemptRecord
@@ -907,15 +939,26 @@ class OrchestrationService:
             dedupe_key=f"reconcile-job-failed:{run_id}:{job.job_id}:{attempt.attempt_id}",
         )
 
-    def _ingest_terminal_log(self, *, terminal_id: str) -> None:
+    def _ingest_terminal_log(self, *, terminal_id: str, full_scan: bool = False) -> None:
         log_path = self._terminal_log_dir / f"{terminal_id}.log"
         if not log_path.exists():
             return
         try:
-            result = self._runtime.ingest_log_update(terminal_id=terminal_id, log_path=log_path)
+            if full_scan:
+                log_text = log_path.read_text(encoding="utf-8", errors="ignore")
+                if not log_text:
+                    return
+                result = self._runtime.callback_ingestor.ingest_terminal_output(
+                    terminal_id=terminal_id,
+                    output=log_text,
+                )
+                for run_id in result.affected_run_ids:
+                    self._runtime.notify_run_update(run_id=run_id)
+            else:
+                result = self._runtime.ingest_log_update(terminal_id=terminal_id, log_path=log_path)
             if result.ingestion_failures:
                 logger.warning(
-                    "Orchestration startup reconciliation saw marker ingestion errors for %s",
+                    "Orchestration log ingestion saw marker ingestion errors for %s",
                     terminal_id,
                 )
         except Exception:

@@ -28,6 +28,14 @@ MARKER_PREFIX = "⟦CAO-EVENT-v1:"
 MARKER_SUFFIX = "⟧"
 MARKER_PATTERN = re.compile(r"⟦[^⟧]+⟧")
 EXACT_MARKER_PATTERN = re.compile(r"^⟦CAO-EVENT-v1:(?P<encoded>[A-Za-z0-9_-]+)⟧$")
+# Strip common ANSI/VT100 escape sequences that may appear in tmux log captures.
+ANSI_ESCAPE_PATTERN = re.compile(
+    r"\x1B(?:"
+    r"\[[0-?]*[ -/]*[@-~]"  # CSI
+    r"|\][^\x1B\x07]*(?:\x1B\\|\x07)"  # OSC
+    r"|[@-Z\\-_]"  # 7-bit C1 controls
+    r")"
+)
 
 # Prompt fragment for orchestration-spawned workers only.
 # This must not alter legacy assign/handoff prompt behavior.
@@ -99,16 +107,38 @@ def _base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
-def _canonicalize_marker_text(marker_text: str) -> str:
+def _strip_terminal_artifacts(text: str) -> str:
+    """Remove ANSI escape/control sequences from marker text."""
+
+    return ANSI_ESCAPE_PATTERN.sub("", text)
+
+
+def _canonicalize_marker_text(
+    marker_text: str,
+    *,
+    collapse_wrapped_whitespace: bool = False,
+) -> str:
     """Normalize terminal-wrapped marker text into its canonical single-line form."""
 
     stripped = marker_text.strip()
     if not (stripped.startswith("⟦") and stripped.endswith("⟧")):
         return stripped
 
-    inner = stripped[1:-1]
-    # Terminal line wrapping can split markers across lines; normalize only hard line breaks.
-    inner_no_linebreaks = inner.replace("\n", "").replace("\r", "")
+    inner = _strip_terminal_artifacts(stripped[1:-1])
+    if collapse_wrapped_whitespace:
+        # Real tmux logs can indent wrapped lines inside the marker payload.
+        # Only remove hard wraps and leading spaces on continuation lines;
+        # do not delete arbitrary internal whitespace.
+        lines = inner.replace("\r", "").split("\n")
+        if len(lines) == 1:
+            inner_no_linebreaks = lines[0]
+        else:
+            rebuilt = [lines[0]]
+            rebuilt.extend(line.lstrip(" ") for line in lines[1:])
+            inner_no_linebreaks = "".join(rebuilt)
+    else:
+        # Strict parsing: only normalize hard line breaks.
+        inner_no_linebreaks = inner.replace("\n", "").replace("\r", "")
     return f"⟦{inner_no_linebreaks}⟧"
 
 
@@ -151,7 +181,10 @@ def extract_worker_callback_markers(
 
     for marker_match in MARKER_PATTERN.finditer(output_text):
         raw_marker = marker_match.group(0)
-        canonical_marker = _canonicalize_marker_text(raw_marker)
+        canonical_marker = _canonicalize_marker_text(
+            raw_marker,
+            collapse_wrapped_whitespace=True,
+        )
         if not canonical_marker.startswith(MARKER_PREFIX):
             continue
 

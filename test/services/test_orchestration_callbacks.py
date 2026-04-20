@@ -24,6 +24,22 @@ def _wrap_marker_like_terminal_output(marker: str) -> str:
     return f"⟦CAO-EVENT-\nv1:{payload[:18]}\n{payload[18:44]}\n{payload[44:]}⟧"
 
 
+def _wrap_marker_like_ansi_terminal_output(marker: str) -> str:
+    assert marker.startswith("⟦CAO-EVENT-v1:")
+    assert marker.endswith("⟧")
+    payload = marker[len("⟦CAO-EVENT-v1:") : -1]
+    segments = [payload[i : i + 120] for i in range(0, len(payload), 120)]
+    if len(segments) < 3:
+        segments = [payload[:20], payload[20:40], payload[40:]]
+
+    lines = [f"\x1b[39;49m\x1b[K  ⟦CAO-EVENT-\x1b[39m\x1b[49m\x1b[0m"]
+    for index, segment in enumerate(segments):
+        prefix = "v1:" if index == 0 else ""
+        suffix = "⟧" if index == len(segments) - 1 else ""
+        lines.append(f"\x1b[39;49m\x1b[K  {prefix}{segment}{suffix}\x1b[39m\x1b[49m\x1b[0m")
+    return "\n".join(lines)
+
+
 @pytest.fixture
 def store(tmp_path: Path) -> OrchestrationStore:
     db_file = tmp_path / "orchestration-callbacks.db"
@@ -111,6 +127,59 @@ def test_extract_markers_parses_wrapped_marker_shape() -> None:
     parsed_direct = parse_worker_callback_marker(wrapped_marker)
     assert parsed_direct.run_id == "run-1"
     assert parsed_direct.nonce == "evt-wrapped"
+
+
+def test_extract_markers_parses_ansi_wrapped_marker_shape() -> None:
+    marker = encode_worker_callback_marker(
+        {
+            "version": 1,
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "attempt_id": "attempt-1",
+            "type": "job.completed",
+            "status": "succeeded",
+            "result": {"summary": "done"},
+            "nonce": "evt-ansi-wrapped",
+        }
+    )
+    wrapped_marker = _wrap_marker_like_ansi_terminal_output(marker)
+
+    parsed, failures = extract_worker_callback_markers(f"prefix\n{wrapped_marker}\nsuffix")
+
+    assert len(parsed) == 1
+    assert failures == []
+    assert parsed[0].marker.run_id == "run-1"
+    assert parsed[0].marker.nonce == "evt-ansi-wrapped"
+
+
+@pytest.mark.parametrize("injected_whitespace", [" ", "\t"])
+def test_extract_rejects_marker_with_injected_payload_whitespace(
+    injected_whitespace: str,
+) -> None:
+    marker = encode_worker_callback_marker(
+        {
+            "version": 1,
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "attempt_id": "attempt-1",
+            "type": "job.completed",
+            "status": "succeeded",
+            "result": {"summary": "done"},
+            "nonce": "evt-injected-whitespace",
+        }
+    )
+    payload = marker[len("⟦CAO-EVENT-v1:") : -1]
+    malformed = (
+        f"⟦CAO-EVENT-v1:{payload[:16]}"
+        f"{injected_whitespace}"
+        f"{payload[16:]}⟧"
+    )
+
+    parsed, failures = extract_worker_callback_markers(f"prefix {malformed} suffix")
+
+    assert parsed == []
+    assert len(failures) == 1
+    assert failures[0].code == "invalid_marker_framing"
 
 
 def test_parse_marker_accepts_crlf_wrapped_marker() -> None:
@@ -270,6 +339,41 @@ def test_ingestion_persists_wrapped_completion_marker(seeded_store: Orchestratio
         EventType.ATTEMPT_SUCCEEDED.value,
         EventType.JOB_SUCCEEDED.value,
     ]
+
+
+def test_ingestion_persists_ansi_wrapped_completion_marker(
+    seeded_store: OrchestrationStore,
+) -> None:
+    ingestor = OrchestrationCallbackIngestor(store=seeded_store)
+    marker = encode_worker_callback_marker(
+        {
+            "version": 1,
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "attempt_id": "attempt-1",
+            "type": "job.completed",
+            "status": "succeeded",
+            "result": {"summary": "Implemented ANSI wrapped marker changes"},
+            "nonce": "evt-ansi-wrapped-ingest",
+        }
+    )
+    wrapped_marker = _wrap_marker_like_ansi_terminal_output(marker)
+
+    result = ingestor.ingest_terminal_output(
+        terminal_id="term-1",
+        output=f"worker output:\n{wrapped_marker}",
+    )
+
+    assert result.markers_seen == 1
+    assert result.markers_ingested == 1
+    assert result.events_appended == 2
+    assert result.parse_failures == []
+    assert result.ingestion_failures == []
+
+    attempt = seeded_store.get_attempt(attempt_id="attempt-1")
+    assert attempt is not None
+    assert attempt.status == AttemptStatus.SUCCEEDED.value
+    assert attempt.nonce == "evt-ansi-wrapped-ingest"
 
 
 def test_ingestion_dedupes_repeated_markers(seeded_store: OrchestrationStore) -> None:

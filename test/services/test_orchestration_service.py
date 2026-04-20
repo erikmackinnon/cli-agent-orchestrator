@@ -83,12 +83,29 @@ def _noop_send_input(_terminal_id: str, _message: str) -> bool:
     return True
 
 
+def _wrap_marker_like_ansi_terminal_output(marker: str) -> str:
+    assert marker.startswith("⟦CAO-EVENT-v1:")
+    assert marker.endswith("⟧")
+    payload = marker[len("⟦CAO-EVENT-v1:") : -1]
+    segments = [payload[i : i + 120] for i in range(0, len(payload), 120)]
+    if len(segments) < 3:
+        segments = [payload[:20], payload[20:40], payload[40:]]
+
+    lines = [f"\x1b[39;49m\x1b[K  ⟦CAO-EVENT-\x1b[39m\x1b[49m\x1b[0m"]
+    for index, segment in enumerate(segments):
+        prefix = "v1:" if index == 0 else ""
+        suffix = "⟧" if index == len(segments) - 1 else ""
+        lines.append(f"\x1b[39;49m\x1b[K  {prefix}{segment}{suffix}\x1b[39m\x1b[49m\x1b[0m")
+    return "\n".join(lines)
+
+
 def test_scheduler_enforces_worker_reviewer_and_total_caps(runtime: OrchestrationRuntime) -> None:
     factory = _TerminalFactory()
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
         send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda _terminal_id: True,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
 
@@ -151,6 +168,7 @@ def test_job_and_run_timeouts_transition_states(runtime: OrchestrationRuntime) -
         send_input_fn=_noop_send_input,
         send_special_key_fn=_interrupt,
         delete_terminal_fn=_delete,
+        terminal_exists_fn=lambda _terminal_id: True,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
         now_fn=clock.now,
     )
@@ -211,6 +229,7 @@ def test_cancel_run_cancels_active_and_queued_jobs(runtime: OrchestrationRuntime
         runtime=runtime,
         create_session_fn=factory,
         send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda _terminal_id: True,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
 
@@ -324,6 +343,7 @@ def test_finalize_rejects_when_run_has_active_jobs(runtime: OrchestrationRuntime
         runtime=runtime,
         create_session_fn=factory,
         send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda _terminal_id: True,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
 
@@ -610,6 +630,7 @@ def test_spawn_from_idle_moves_run_back_to_running(runtime: OrchestrationRuntime
         runtime=runtime,
         create_session_fn=factory,
         send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda _terminal_id: True,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
 
@@ -721,6 +742,102 @@ def test_reconcile_startup_ingests_pending_worker_marker_log(
     assert refreshed_attempt.status == AttemptStatus.SUCCEEDED.value
     assert refreshed_job.status == JobStatus.SUCCEEDED.value
     assert run_status == "idle"
+
+
+def test_maintenance_marks_running_attempt_failed_when_terminal_exits_without_marker(
+    runtime: OrchestrationRuntime,
+) -> None:
+    factory = _TerminalFactory()
+    terminal_alive = {"term-0": True}
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda terminal_id: terminal_alive.get(terminal_id, False),
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+    )
+
+    started = service.start(
+        OrchestrationStartRequest(
+            name="maintenance-reconcile-missing-terminal",
+            jobs=[
+                OrchestrationJobSpec(agent_profile="developer", message="work", role="developer")
+            ],
+        )
+    )
+
+    attempt = runtime.store.list_attempts(run_id=started.run_id)[0]
+    assert attempt.status == AttemptStatus.RUNNING.value
+    terminal_alive[attempt.terminal_id] = False
+
+    status = service.status(OrchestrationStatusRequest(run_id=started.run_id))
+    refreshed_attempt = runtime.store.get_attempt(attempt_id=attempt.attempt_id)
+    refreshed_job = runtime.store.get_job(job_id=attempt.job_id)
+
+    assert refreshed_attempt is not None
+    assert refreshed_job is not None
+    assert refreshed_attempt.status == AttemptStatus.FAILED.value
+    assert refreshed_job.status == JobStatus.FAILED.value
+    assert status.run.status == RunStatus.IDLE.value
+    assert refreshed_attempt.result_summary == "terminal_missing"
+
+
+def test_maintenance_recovers_completion_marker_from_full_log_when_terminal_exits(
+    runtime: OrchestrationRuntime, tmp_path: Path
+) -> None:
+    factory = _TerminalFactory()
+    terminal_alive = {"term-0": True}
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda terminal_id: terminal_alive.get(terminal_id, False),
+        terminal_log_dir=tmp_path,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+    )
+
+    started = service.start(
+        OrchestrationStartRequest(
+            name="maintenance-recover-missing-callback",
+            jobs=[
+                OrchestrationJobSpec(agent_profile="reviewer", message="review", role="reviewer")
+            ],
+        )
+    )
+    attempt = runtime.store.list_attempts(run_id=started.run_id)[0]
+    marker = encode_worker_callback_marker(
+        {
+            "version": 1,
+            "run_id": started.run_id,
+            "job_id": attempt.job_id,
+            "attempt_id": attempt.attempt_id,
+            "type": "job.completed",
+            "status": "succeeded",
+            "result": {"summary": "review complete"},
+            "nonce": "maintenance-recover-marker",
+        }
+    )
+    wrapped_marker = _wrap_marker_like_ansi_terminal_output(marker)
+    log_path = tmp_path / f"{attempt.terminal_id}.log"
+    log_path.write_text(f"{wrapped_marker}\n", encoding="utf-8")
+
+    # Simulate a prior parser miss that already advanced persisted offset to EOF.
+    runtime.store.upsert_terminal_log_offset(
+        terminal_id=attempt.terminal_id,
+        byte_offset=log_path.stat().st_size,
+    )
+
+    terminal_alive[attempt.terminal_id] = False
+    status = service.status(OrchestrationStatusRequest(run_id=started.run_id))
+
+    refreshed_attempt = runtime.store.get_attempt(attempt_id=attempt.attempt_id)
+    refreshed_job = runtime.store.get_job(job_id=attempt.job_id)
+
+    assert refreshed_attempt is not None
+    assert refreshed_job is not None
+    assert refreshed_attempt.status == AttemptStatus.SUCCEEDED.value
+    assert refreshed_job.status == JobStatus.SUCCEEDED.value
+    assert status.run.status == RunStatus.IDLE.value
 
 
 def test_cancel_run_reaps_successful_worker_terminals(runtime: OrchestrationRuntime) -> None:
