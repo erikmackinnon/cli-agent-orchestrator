@@ -26,8 +26,8 @@ logger = logging.getLogger(__name__)
 
 MARKER_PREFIX = "⟦CAO-EVENT-v1:"
 MARKER_SUFFIX = "⟧"
-MARKER_PATTERN = re.compile(r"⟦CAO-EVENT-v1:(?P<encoded>[^⟧]+)⟧")
-EXACT_MARKER_PATTERN = re.compile(r"^⟦CAO-EVENT-v1:(?P<encoded>[^⟧]+)⟧$")
+MARKER_PATTERN = re.compile(r"⟦[^⟧]+⟧")
+EXACT_MARKER_PATTERN = re.compile(r"^⟦CAO-EVENT-v1:(?P<encoded>[A-Za-z0-9_-]+)⟧$")
 
 # Prompt fragment for orchestration-spawned workers only.
 # This must not alter legacy assign/handoff prompt behavior.
@@ -99,10 +99,23 @@ def _base64url_encode(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode("ascii").rstrip("=")
 
 
+def _canonicalize_marker_text(marker_text: str) -> str:
+    """Normalize terminal-wrapped marker text into its canonical single-line form."""
+
+    stripped = marker_text.strip()
+    if not (stripped.startswith("⟦") and stripped.endswith("⟧")):
+        return stripped
+
+    inner = stripped[1:-1]
+    # Terminal line wrapping can split markers across lines; normalize only hard line breaks.
+    inner_no_linebreaks = inner.replace("\n", "").replace("\r", "")
+    return f"⟦{inner_no_linebreaks}⟧"
+
+
 def parse_worker_callback_marker(marker_text: str) -> WorkerCallbackMarker:
     """Parse one full callback marker into a validated payload."""
 
-    marker_text = marker_text.strip()
+    marker_text = _canonicalize_marker_text(marker_text)
     marker_match = EXACT_MARKER_PATTERN.match(marker_text)
     if marker_match is None:
         raise ValueError("invalid_marker_framing")
@@ -138,8 +151,12 @@ def extract_worker_callback_markers(
 
     for marker_match in MARKER_PATTERN.finditer(output_text):
         raw_marker = marker_match.group(0)
+        canonical_marker = _canonicalize_marker_text(raw_marker)
+        if not canonical_marker.startswith(MARKER_PREFIX):
+            continue
+
         try:
-            parsed_marker = parse_worker_callback_marker(raw_marker)
+            parsed_marker = parse_worker_callback_marker(canonical_marker)
         except ValueError as exc:
             failures.append(MarkerParseFailure(code=str(exc), marker=raw_marker, detail=str(exc)))
             continue
