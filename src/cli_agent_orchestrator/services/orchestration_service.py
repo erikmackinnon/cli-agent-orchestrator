@@ -1240,7 +1240,12 @@ class OrchestrationService:
             attempt = attempts_by_id.get(link["attempt_id"])
             if attempt is None:
                 continue
-            if self._status_value(attempt.status) in self._ATTEMPT_TERMINAL_STATUSES:
+            attempt_status = self._status_value(attempt.status)
+            if attempt_status not in self._ATTEMPT_TERMINAL_STATUSES:
+                continue
+            if attempt_status == AttemptStatus.SUCCEEDED.value:
+                self._terminate_worker_terminal(terminal_id=link["terminal_id"])
+            else:
                 self._store.release_worker_terminal(terminal_id=link["terminal_id"])
 
     def _apply_finalization_cleanup(

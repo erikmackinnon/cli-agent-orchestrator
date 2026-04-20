@@ -678,6 +678,196 @@ async def test_wait_returns_immediately_then_times_out(
         await runtime.stop()
 
 
+@pytest.mark.asyncio
+async def test_wait_maintenance_kills_succeeded_worker_terminal(
+    runtime: OrchestrationRuntime,
+) -> None:
+    await runtime.start()
+    deleted: List[str] = []
+    interrupted: List[str] = []
+    factory = _TerminalFactory()
+
+    def _interrupt(terminal_id: str, _key: str) -> bool:
+        interrupted.append(terminal_id)
+        return True
+
+    def _delete(terminal_id: str) -> bool:
+        deleted.append(terminal_id)
+        return True
+
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_noop_send_input,
+        send_special_key_fn=_interrupt,
+        delete_terminal_fn=_delete,
+        terminal_exists_fn=lambda _terminal_id: True,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+    )
+
+    try:
+        started = service.start(
+            OrchestrationStartRequest(
+                name="wait-success-terminal-cleanup",
+                jobs=[
+                    OrchestrationJobSpec(
+                        agent_profile="developer",
+                        message="work",
+                        role="developer",
+                    )
+                ],
+            )
+        )
+
+        attempt = runtime.store.list_attempts(run_id=started.run_id)[0]
+        runtime.store.update_attempt(
+            attempt_id=attempt.attempt_id,
+            status=AttemptStatus.SUCCEEDED,
+            completed_at=datetime.now(timezone.utc),
+        )
+        runtime.store.update_job(job_id=attempt.job_id, status=JobStatus.SUCCEEDED)
+
+        wait_response = await service.wait(
+            OrchestrationWaitRequest(
+                run_id=started.run_id,
+                cursor=0,
+                min_events=1,
+                wait_timeout_sec=1,
+                include_snapshot=False,
+            )
+        )
+
+        assert wait_response.timeout is False
+        assert deleted == [attempt.terminal_id]
+        assert interrupted == [attempt.terminal_id]
+        link = runtime.store.get_worker_terminal(terminal_id=attempt.terminal_id)
+        assert link is not None
+        assert link["released_at"] is not None
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.parametrize(
+    ("attempt_status", "job_status"),
+    [
+        (AttemptStatus.FAILED, JobStatus.FAILED),
+        (AttemptStatus.CANCELLED, JobStatus.CANCELLED),
+        (AttemptStatus.TIMED_OUT, JobStatus.TIMED_OUT),
+    ],
+)
+def test_status_maintenance_does_not_kill_non_success_terminal_attempts(
+    runtime: OrchestrationRuntime,
+    attempt_status: AttemptStatus,
+    job_status: JobStatus,
+) -> None:
+    deleted: List[str] = []
+    interrupted: List[str] = []
+    factory = _TerminalFactory()
+
+    def _interrupt(terminal_id: str, _key: str) -> bool:
+        interrupted.append(terminal_id)
+        return True
+
+    def _delete(terminal_id: str) -> bool:
+        deleted.append(terminal_id)
+        return True
+
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_noop_send_input,
+        send_special_key_fn=_interrupt,
+        delete_terminal_fn=_delete,
+        terminal_exists_fn=lambda _terminal_id: True,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+    )
+
+    started = service.start(
+        OrchestrationStartRequest(
+            name="status-non-success-terminal-preserve",
+            jobs=[
+                OrchestrationJobSpec(
+                    agent_profile="developer",
+                    message="work",
+                    role="developer",
+                )
+            ],
+        )
+    )
+
+    attempt = runtime.store.list_attempts(run_id=started.run_id)[0]
+    runtime.store.update_attempt(
+        attempt_id=attempt.attempt_id,
+        status=attempt_status,
+        completed_at=datetime.now(timezone.utc),
+    )
+    runtime.store.update_job(job_id=attempt.job_id, status=job_status)
+
+    service.status(OrchestrationStatusRequest(run_id=started.run_id))
+
+    assert deleted == []
+    assert interrupted == []
+    link = runtime.store.get_worker_terminal(terminal_id=attempt.terminal_id)
+    assert link is not None
+    assert link["released_at"] is not None
+
+
+def test_status_maintenance_success_terminal_cleanup_is_idempotent(
+    runtime: OrchestrationRuntime,
+) -> None:
+    deleted: List[str] = []
+    interrupted: List[str] = []
+    factory = _TerminalFactory()
+
+    def _interrupt(terminal_id: str, _key: str) -> bool:
+        interrupted.append(terminal_id)
+        return True
+
+    def _delete(terminal_id: str) -> bool:
+        deleted.append(terminal_id)
+        return True
+
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_noop_send_input,
+        send_special_key_fn=_interrupt,
+        delete_terminal_fn=_delete,
+        terminal_exists_fn=lambda _terminal_id: True,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+    )
+
+    started = service.start(
+        OrchestrationStartRequest(
+            name="status-success-terminal-idempotent-cleanup",
+            jobs=[
+                OrchestrationJobSpec(
+                    agent_profile="developer",
+                    message="work",
+                    role="developer",
+                )
+            ],
+        )
+    )
+
+    attempt = runtime.store.list_attempts(run_id=started.run_id)[0]
+    runtime.store.update_attempt(
+        attempt_id=attempt.attempt_id,
+        status=AttemptStatus.SUCCEEDED,
+        completed_at=datetime.now(timezone.utc),
+    )
+    runtime.store.update_job(job_id=attempt.job_id, status=JobStatus.SUCCEEDED)
+
+    service.status(OrchestrationStatusRequest(run_id=started.run_id))
+    service.status(OrchestrationStatusRequest(run_id=started.run_id))
+
+    assert deleted == [attempt.terminal_id]
+    assert interrupted == [attempt.terminal_id]
+    link = runtime.store.get_worker_terminal(terminal_id=attempt.terminal_id)
+    assert link is not None
+    assert link["released_at"] is not None
+
+
 def test_spawn_from_idle_moves_run_back_to_running(runtime: OrchestrationRuntime) -> None:
     factory = _TerminalFactory()
     service = OrchestrationService(

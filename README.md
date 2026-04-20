@@ -10,6 +10,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-20**: Fixed orchestration maintenance cleanup so successful worker terminals no longer accumulate:
+  - active-run maintenance now auto-terminates `succeeded` worker terminals before releasing their worker links, while preserving non-success terminal attempts for existing debug workflows and keeping repeated maintenance passes idempotent
 - **2026-04-20**: Added orchestration status liveness references for safer supervisor decisions during quiet event windows:
   - `orchestration_status` now returns additive `terminal_refs` when `include_terminal_refs=true`, including per-attempt terminal presence, `terminals.last_active`, persisted log offset + update timestamp, tmux linkage, worker release time, and derived activity age so active workers are distinguishable from truly stale/interrupted ones
 - **2026-04-20**: Restored orchestration callback compatibility for live worker marker versions and tightened emission guidance:
