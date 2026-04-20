@@ -106,6 +106,7 @@ class OrchestrationService:
         *,
         runtime: OrchestrationRuntime,
         create_session_fn: Callable[..., Terminal] = session_service.create_session,
+        send_input_fn: Callable[[str, str], bool] = terminal_service.send_input,
         send_special_key_fn: Callable[[str, str], bool] = terminal_service.send_special_key,
         delete_terminal_fn: Callable[[str], bool] = terminal_service.delete_terminal,
         resolve_provider_fn: Callable[[str, str], str] = resolve_provider,
@@ -116,6 +117,7 @@ class OrchestrationService:
         self._runtime = runtime
         self._store = runtime.store
         self._create_session = create_session_fn
+        self._send_input = send_input_fn
         self._send_special_key = send_special_key_fn
         self._delete_terminal = delete_terminal_fn
         self._resolve_provider = resolve_provider_fn
@@ -647,6 +649,9 @@ class OrchestrationService:
                 tmux_session=terminal.session_name,
                 tmux_window=terminal.name,
             )
+            sent = self._send_input(terminal.id, job.message)
+            if not sent:
+                raise RuntimeError("terminal input delivery returned False")
 
             self._append_event(
                 run_id=run.run_id,

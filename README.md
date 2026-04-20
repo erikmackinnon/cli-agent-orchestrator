@@ -10,6 +10,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-20**: Fixed orchestration worker prompt delivery during attempt start:
+  - `_start_attempt()` now sends each queued `job.message` into the newly created worker terminal via the existing terminal input path, and treats post-spawn input-delivery failures as attempt-start failures with deterministic terminal cleanup and failed job/attempt lifecycle events
 - **2026-04-18**: Completed orchestration recovery/reaper and Codex starter proof (W13/W16/W17):
   - added startup reconciliation for running attempts, periodic terminal reaper cleanup for finalized/cancelled/timed-out runs (including TTL retention handling), a Codex-focused orchestration starter-scenario e2e (`4 dev -> review -> reject -> fix -> approve -> finalize` via repeated blocking waits), and final operator docs for orchestration usage/config/deferred limits
 - **2026-04-18**: Exposed orchestration run lifecycle on public server surfaces (W11/W12/W14/W15):

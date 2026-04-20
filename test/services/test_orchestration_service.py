@@ -79,11 +79,16 @@ def runtime(store: OrchestrationStore) -> OrchestrationRuntime:
     return OrchestrationRuntime(store=store)
 
 
+def _noop_send_input(_terminal_id: str, _message: str) -> bool:
+    return True
+
+
 def test_scheduler_enforces_worker_reviewer_and_total_caps(runtime: OrchestrationRuntime) -> None:
     factory = _TerminalFactory()
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
 
@@ -143,6 +148,7 @@ def test_job_and_run_timeouts_transition_states(runtime: OrchestrationRuntime) -
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         send_special_key_fn=_interrupt,
         delete_terminal_fn=_delete,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
@@ -204,6 +210,7 @@ def test_cancel_run_cancels_active_and_queued_jobs(runtime: OrchestrationRuntime
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
 
@@ -255,6 +262,7 @@ def test_run_idle_is_emitted_separately_from_finalize(runtime: OrchestrationRunt
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         delete_terminal_fn=_delete,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
@@ -315,6 +323,7 @@ def test_finalize_rejects_when_run_has_active_jobs(runtime: OrchestrationRuntime
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
 
@@ -403,6 +412,109 @@ def test_finalize_is_idempotent_for_already_finalized_run(runtime: Orchestration
     assert second.summary == first.summary
 
 
+def test_start_attempt_sends_job_message_to_worker_terminal(runtime: OrchestrationRuntime) -> None:
+    factory = _TerminalFactory()
+    sent_messages: List[tuple[str, str]] = []
+
+    def _send_input(terminal_id: str, message: str) -> bool:
+        sent_messages.append((terminal_id, message))
+        return True
+
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_send_input,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+    )
+
+    start_response = service.start(
+        OrchestrationStartRequest(
+            name="send-message-success",
+            jobs=[
+                OrchestrationJobSpec(
+                    agent_profile="developer",
+                    message="deliver this prompt",
+                    role="developer",
+                )
+            ],
+        )
+    )
+
+    jobs = runtime.store.list_jobs(run_id=start_response.run_id)
+    attempts = runtime.store.list_attempts(run_id=start_response.run_id)
+    assert len(jobs) == 1
+    assert len(attempts) == 1
+    assert jobs[0].status == JobStatus.RUNNING.value
+    assert attempts[0].status == AttemptStatus.RUNNING.value
+    assert attempts[0].terminal_id == "term-0"
+    assert sent_messages == [("term-0", "deliver this prompt")]
+
+
+def test_start_attempt_cleans_up_terminal_when_input_send_fails(
+    runtime: OrchestrationRuntime,
+) -> None:
+    factory = _TerminalFactory()
+    interrupted: List[str] = []
+    deleted: List[str] = []
+
+    def _send_input(_terminal_id: str, _message: str) -> bool:
+        raise RuntimeError("send failed")
+
+    def _interrupt(terminal_id: str, _key: str) -> bool:
+        interrupted.append(terminal_id)
+        return True
+
+    def _delete(terminal_id: str) -> bool:
+        deleted.append(terminal_id)
+        return True
+
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_send_input,
+        send_special_key_fn=_interrupt,
+        delete_terminal_fn=_delete,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+    )
+
+    start_response = service.start(
+        OrchestrationStartRequest(
+            name="send-message-failure-cleanup",
+            jobs=[
+                OrchestrationJobSpec(
+                    agent_profile="developer",
+                    message="work-item",
+                    role="developer",
+                )
+            ],
+        )
+    )
+
+    jobs = runtime.store.list_jobs(run_id=start_response.run_id)
+    attempts = runtime.store.list_attempts(run_id=start_response.run_id)
+    assert len(jobs) == 1
+    assert len(attempts) == 1
+    assert jobs[0].status == JobStatus.FAILED.value
+    assert attempts[0].status == AttemptStatus.FAILED.value
+    assert attempts[0].terminal_id == "term-0"
+    assert interrupted == ["term-0"]
+    assert deleted == ["term-0"]
+    link = runtime.store.get_worker_terminal(terminal_id="term-0")
+    assert link is not None
+    assert link["released_at"] is not None
+
+    event_types = [
+        event.event_type
+        for event in runtime.store.read_events(
+            run_id=start_response.run_id, cursor=0, max_events=100
+        )
+    ]
+    assert EventType.ATTEMPT_FAILED.value in event_types
+    assert EventType.JOB_FAILED.value in event_types
+    assert EventType.ATTEMPT_STARTED.value not in event_types
+    assert EventType.JOB_STARTED.value not in event_types
+
+
 def test_start_attempt_cleans_up_terminal_when_linking_fails(runtime: OrchestrationRuntime) -> None:
     factory = _TerminalFactory()
     interrupted: List[str] = []
@@ -419,6 +531,7 @@ def test_start_attempt_cleans_up_terminal_when_linking_fails(runtime: Orchestrat
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         send_special_key_fn=_interrupt,
         delete_terminal_fn=_delete,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
@@ -496,6 +609,7 @@ def test_spawn_from_idle_moves_run_back_to_running(runtime: OrchestrationRuntime
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
 
@@ -527,6 +641,7 @@ def test_reconcile_startup_marks_running_attempt_failed_when_terminal_missing(
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         terminal_exists_fn=lambda _terminal_id: False,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
     )
@@ -565,6 +680,7 @@ def test_reconcile_startup_ingests_pending_worker_marker_log(
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         terminal_exists_fn=lambda _terminal_id: True,
         terminal_log_dir=tmp_path,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
@@ -618,6 +734,7 @@ def test_cancel_run_reaps_successful_worker_terminals(runtime: OrchestrationRunt
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         delete_terminal_fn=_delete,
         terminal_exists_fn=lambda _terminal_id: True,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
@@ -672,6 +789,7 @@ def test_reaper_kills_preserved_successful_terminals_when_ttl_expires(
     service = OrchestrationService(
         runtime=runtime,
         create_session_fn=factory,
+        send_input_fn=_noop_send_input,
         delete_terminal_fn=_delete,
         terminal_exists_fn=lambda _terminal_id: True,
         resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
