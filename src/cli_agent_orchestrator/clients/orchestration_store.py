@@ -53,6 +53,21 @@ class SubscriptionCursor(TypedDict):
     updated_at: datetime
 
 
+class AttemptTerminalRefRow(TypedDict):
+    """Joined attempt/terminal/log liveness row."""
+
+    attempt_id: str
+    job_id: str
+    terminal_id: Optional[str]
+    terminal_present: Optional[bool]
+    terminal_last_active_at: Optional[datetime]
+    log_offset: Optional[int]
+    last_log_activity_at: Optional[datetime]
+    tmux_session: Optional[str]
+    tmux_window: Optional[str]
+    worker_terminal_released_at: Optional[datetime]
+
+
 class OrchestrationStore:
     """Repository facade for orchestration persistence."""
 
@@ -86,6 +101,16 @@ class OrchestrationStore:
         return datetime.fromisoformat(value)
 
     @staticmethod
+    def _coerce_datetime(value: Any) -> Optional[datetime]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value
+        if isinstance(value, str):
+            return datetime.fromisoformat(value)
+        raise ValueError(f"Unsupported datetime value type: {type(value).__name__}")
+
+    @staticmethod
     def _json_dump(value: Optional[Dict[str, Any]]) -> Optional[str]:
         if value is None:
             return None
@@ -116,6 +141,19 @@ class OrchestrationStore:
     @staticmethod
     def _status_value(status: RunStatus | JobStatus | AttemptStatus | EventType) -> str:
         return str(status.value)
+
+    @staticmethod
+    def _table_exists(conn: sqlite3.Connection, *, table_name: str) -> bool:
+        row = conn.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            LIMIT 1
+            """,
+            (table_name,),
+        ).fetchone()
+        return row is not None
 
     def _row_to_run_record(self, row: sqlite3.Row) -> RunRecord:
         return RunRecord(
@@ -928,6 +966,92 @@ class OrchestrationStore:
         if row is None:
             return None
         return int(row["byte_offset"])
+
+    def list_attempt_terminal_refs(self, *, run_id: str) -> List[AttemptTerminalRefRow]:
+        """Return per-attempt terminal/log references for status/liveness surfaces."""
+        with self._connect() as conn:
+            has_terminals_table = self._table_exists(conn, table_name="terminals")
+            terminals_select = (
+                "t.id AS terminal_present_id, t.last_active AS terminal_last_active_at"
+                if has_terminals_table
+                else "NULL AS terminal_present_id, NULL AS terminal_last_active_at"
+            )
+            terminals_join = (
+                "LEFT JOIN terminals t ON t.id = COALESCE(a.terminal_id, wt.terminal_id)"
+                if has_terminals_table
+                else ""
+            )
+
+            rows = conn.execute(
+                f"""
+                WITH latest_worker_terminals AS (
+                    SELECT
+                        wt.*,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY wt.attempt_id
+                            ORDER BY
+                                CASE WHEN wt.released_at IS NULL THEN 0 ELSE 1 END ASC,
+                                wt.updated_at DESC,
+                                wt.created_at DESC,
+                                wt.terminal_id DESC
+                        ) AS rn
+                    FROM worker_terminals wt
+                    WHERE wt.run_id = ?
+                )
+                SELECT
+                    a.attempt_id,
+                    a.job_id,
+                    COALESCE(a.terminal_id, wt.terminal_id) AS resolved_terminal_id,
+                    {terminals_select},
+                    lo.byte_offset AS log_offset,
+                    lo.updated_at AS last_log_activity_at,
+                    wt.tmux_session,
+                    wt.tmux_window,
+                    wt.released_at AS worker_terminal_released_at
+                FROM orchestration_attempts a
+                LEFT JOIN latest_worker_terminals wt
+                    ON wt.attempt_id = a.attempt_id
+                    AND wt.rn = 1
+                LEFT JOIN orchestration_log_offsets lo
+                    ON lo.terminal_id = COALESCE(a.terminal_id, wt.terminal_id)
+                {terminals_join}
+                WHERE a.run_id = ?
+                ORDER BY a.created_at ASC, a.attempt_id ASC
+                """,
+                (run_id, run_id),
+            ).fetchall()
+
+        refs: List[AttemptTerminalRefRow] = []
+        for row in rows:
+            terminal_id = row["resolved_terminal_id"]
+            terminal_present: Optional[bool] = None
+            if terminal_id is not None:
+                terminal_present = (
+                    bool(row["terminal_present_id"]) if has_terminals_table else False
+                )
+
+            refs.append(
+                {
+                    "attempt_id": row["attempt_id"],
+                    "job_id": row["job_id"],
+                    "terminal_id": terminal_id,
+                    "terminal_present": terminal_present,
+                    "terminal_last_active_at": self._coerce_datetime(
+                        row["terminal_last_active_at"]
+                    ),
+                    "log_offset": (
+                        int(row["log_offset"]) if row["log_offset"] is not None else None
+                    ),
+                    "last_log_activity_at": self._coerce_datetime(row["last_log_activity_at"]),
+                    "tmux_session": row["tmux_session"],
+                    "tmux_window": row["tmux_window"],
+                    "worker_terminal_released_at": self._coerce_datetime(
+                        row["worker_terminal_released_at"]
+                    ),
+                }
+            )
+
+        return refs
 
     def upsert_terminal_log_offset(
         self,

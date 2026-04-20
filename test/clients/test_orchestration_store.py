@@ -1,5 +1,6 @@
 """Tests for the orchestration store repository layer."""
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -158,6 +159,49 @@ def test_worker_terminal_linkage_and_subscription_cursor(store: OrchestrationSto
 
     assert store.delete_subscription(run_id="run-1", subscriber_id="waiter-1") is True
     assert store.get_subscription(run_id="run-1", subscriber_id="waiter-1") is None
+
+
+def test_list_attempt_terminal_refs_selects_single_latest_worker_terminal(
+    store: OrchestrationStore,
+) -> None:
+    store.create_run(run_id="run-1")
+    store.create_job(
+        job_id="job-1",
+        run_id="run-1",
+        agent_profile="developer",
+        message="Work",
+    )
+    store.create_attempt(attempt_id="attempt-1", run_id="run-1", job_id="job-1")
+
+    created_at = datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc)
+    store.link_worker_terminal(
+        terminal_id="term-old",
+        run_id="run-1",
+        job_id="job-1",
+        attempt_id="attempt-1",
+        tmux_session="cao-old",
+        tmux_window="w-old",
+        created_at=created_at,
+        released_at=created_at + timedelta(seconds=1),
+    )
+    store.link_worker_terminal(
+        terminal_id="term-new",
+        run_id="run-1",
+        job_id="job-1",
+        attempt_id="attempt-1",
+        tmux_session="cao-new",
+        tmux_window="w-new",
+        created_at=created_at + timedelta(seconds=2),
+    )
+
+    refs = store.list_attempt_terminal_refs(run_id="run-1")
+
+    assert len(refs) == 1
+    assert refs[0]["attempt_id"] == "attempt-1"
+    assert refs[0]["terminal_id"] == "term-new"
+    assert refs[0]["tmux_session"] == "cao-new"
+    assert refs[0]["tmux_window"] == "w-new"
+    assert refs[0]["worker_terminal_released_at"] is None
 
 
 def test_terminal_log_offset_persistence(store: OrchestrationStore) -> None:

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from cli_agent_orchestrator.models.orchestration import (
+    AttemptTerminalRef,
     OrchestrationCancelResponse,
     OrchestrationFinalizeResponse,
     OrchestrationSpawnResponse,
@@ -161,6 +162,51 @@ def test_orchestration_status_success(client):
     data = response.json()
     assert data["run"]["run_id"] == "run-1"
     assert data["snapshot"]["latest_event_cursor"] == 7
+
+
+def test_orchestration_status_includes_terminal_refs_when_present(client):
+    now = datetime.now(timezone.utc)
+    mock_service = MagicMock()
+    mock_service.status.return_value = OrchestrationStatusResponse(
+        run=RunRecord(
+            run_id="run-1",
+            status=RunStatus.RUNNING,
+            created_at=now,
+            updated_at=now,
+        ),
+        snapshot=RunSnapshot(
+            run_id="run-1",
+            run_status=RunStatus.RUNNING,
+            latest_event_cursor=8,
+        ),
+        terminal_refs=[
+            AttemptTerminalRef(
+                attempt_id="attempt-1",
+                job_id="job-1",
+                terminal_id="term-1",
+                terminal_present=True,
+                terminal_last_active_at=now,
+                log_offset=12,
+                last_log_activity_at=now,
+                activity_age_sec=0,
+                tmux_session="cao-run-1",
+                tmux_window="w-1",
+            )
+        ],
+    )
+
+    with patch(
+        "cli_agent_orchestrator.api.main.get_orchestration_service", return_value=mock_service
+    ):
+        response = client.post(
+            "/orchestration/status",
+            json={"run_id": "run-1", "include_terminal_refs": True},
+        )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["terminal_refs"][0]["attempt_id"] == "attempt-1"
+    assert data["terminal_refs"][0]["terminal_present"] is True
 
 
 def test_orchestration_cancel_scope_validation(client):

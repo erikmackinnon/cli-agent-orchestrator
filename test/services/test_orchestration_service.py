@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import sqlite3
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import List
@@ -97,6 +100,57 @@ def _wrap_marker_like_ansi_terminal_output(marker: str) -> str:
         suffix = "⟧" if index == len(segments) - 1 else ""
         lines.append(f"\x1b[39;49m\x1b[K  {prefix}{segment}{suffix}\x1b[39m\x1b[49m\x1b[0m")
     return "\n".join(lines)
+
+
+def _upsert_terminal_metadata(
+    *,
+    runtime: OrchestrationRuntime,
+    terminal_id: str,
+    last_active: datetime,
+    tmux_session: str = "cao-test-session",
+    tmux_window: str = "w-test",
+    provider: str = "codex",
+) -> None:
+    with sqlite3.connect(str(runtime.store._database_file)) as conn:  # noqa: SLF001
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS terminals (
+                id TEXT PRIMARY KEY,
+                tmux_session TEXT NOT NULL,
+                tmux_window TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                agent_profile TEXT,
+                allowed_tools TEXT,
+                last_active TEXT
+            )
+            """)
+        conn.execute(
+            """
+            INSERT INTO terminals (
+                id, tmux_session, tmux_window, provider, agent_profile, allowed_tools, last_active
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                tmux_session = excluded.tmux_session,
+                tmux_window = excluded.tmux_window,
+                provider = excluded.provider,
+                last_active = excluded.last_active
+            """,
+            (
+                terminal_id,
+                tmux_session,
+                tmux_window,
+                provider,
+                "developer",
+                None,
+                last_active.isoformat(),
+            ),
+        )
+        conn.commit()
+
+
+def _delete_terminal_metadata(*, runtime: OrchestrationRuntime, terminal_id: str) -> None:
+    with sqlite3.connect(str(runtime.store._database_file)) as conn:  # noqa: SLF001
+        conn.execute("DELETE FROM terminals WHERE id = ?", (terminal_id,))
+        conn.commit()
 
 
 def test_scheduler_enforces_worker_reviewer_and_total_caps(runtime: OrchestrationRuntime) -> None:
@@ -653,6 +707,246 @@ def test_spawn_from_idle_moves_run_back_to_running(runtime: OrchestrationRuntime
 
     status_after_spawn = service.status(OrchestrationStatusRequest(run_id=start_response.run_id))
     assert status_after_spawn.run.status == "running"
+
+
+def test_status_includes_terminal_liveness_when_requested(runtime: OrchestrationRuntime) -> None:
+    factory = _TerminalFactory()
+    clock = _Clock(datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc))
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda _terminal_id: True,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+        now_fn=clock.now,
+    )
+
+    started = service.start(
+        OrchestrationStartRequest(
+            name="status-liveness-present",
+            jobs=[
+                OrchestrationJobSpec(agent_profile="developer", message="work", role="developer")
+            ],
+        )
+    )
+
+    attempt = runtime.store.list_attempts(run_id=started.run_id)[0]
+    assert attempt.terminal_id is not None
+
+    terminal_last_active = datetime(2026, 4, 20, 11, 59, 20, tzinfo=timezone.utc)
+    _upsert_terminal_metadata(
+        runtime=runtime,
+        terminal_id=attempt.terminal_id,
+        last_active=terminal_last_active,
+    )
+
+    log_updated_at = datetime(2026, 4, 20, 11, 59, 40, tzinfo=timezone.utc)
+    runtime.store.upsert_terminal_log_offset(
+        terminal_id=attempt.terminal_id,
+        byte_offset=456,
+        updated_at=log_updated_at,
+    )
+
+    status = service.status(
+        OrchestrationStatusRequest(run_id=started.run_id, include_terminal_refs=True)
+    )
+    assert status.terminal_refs is not None
+    ref = status.terminal_refs[0]
+
+    assert ref.attempt_id == attempt.attempt_id
+    assert ref.job_id == attempt.job_id
+    assert ref.terminal_id == attempt.terminal_id
+    assert ref.terminal_present is True
+    assert ref.terminal_last_active_at == terminal_last_active
+    assert ref.log_offset == 456
+    assert ref.last_log_activity_at == log_updated_at
+    assert ref.activity_age_sec == 20
+    assert ref.tmux_session is not None
+    assert ref.tmux_window is not None
+    assert ref.worker_terminal_released_at is None
+
+
+def test_status_liveness_interprets_naive_terminal_timestamp_as_local_time(
+    runtime: OrchestrationRuntime,
+) -> None:
+    if not hasattr(time, "tzset"):
+        pytest.skip("time.tzset is unavailable on this platform")
+
+    original_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "America/Vancouver"
+        time.tzset()
+
+        factory = _TerminalFactory()
+        naive_local_last_active = datetime(2026, 4, 20, 11, 59, 20)
+        expected_last_active_utc = naive_local_last_active.astimezone(timezone.utc)
+        clock = _Clock(expected_last_active_utc + timedelta(seconds=40))
+        service = OrchestrationService(
+            runtime=runtime,
+            create_session_fn=factory,
+            send_input_fn=_noop_send_input,
+            terminal_exists_fn=lambda _terminal_id: True,
+            resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+            now_fn=clock.now,
+        )
+
+        started = service.start(
+            OrchestrationStartRequest(
+                name="status-liveness-naive-local",
+                jobs=[
+                    OrchestrationJobSpec(
+                        agent_profile="developer",
+                        message="work",
+                        role="developer",
+                    )
+                ],
+            )
+        )
+
+        attempt = runtime.store.list_attempts(run_id=started.run_id)[0]
+        assert attempt.terminal_id is not None
+        _upsert_terminal_metadata(
+            runtime=runtime,
+            terminal_id=attempt.terminal_id,
+            last_active=naive_local_last_active,
+        )
+
+        status = service.status(
+            OrchestrationStatusRequest(run_id=started.run_id, include_terminal_refs=True)
+        )
+        assert status.terminal_refs is not None
+        ref = status.terminal_refs[0]
+
+        assert ref.terminal_last_active_at == expected_last_active_utc
+        assert ref.activity_age_sec == 40
+    finally:
+        if original_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = original_tz
+        time.tzset()
+
+
+def test_status_liveness_handles_missing_terminal_row(runtime: OrchestrationRuntime) -> None:
+    factory = _TerminalFactory()
+    clock = _Clock(datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc))
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda _terminal_id: True,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+        now_fn=clock.now,
+    )
+
+    started = service.start(
+        OrchestrationStartRequest(
+            name="status-liveness-terminal-gone",
+            jobs=[
+                OrchestrationJobSpec(agent_profile="developer", message="work", role="developer")
+            ],
+        )
+    )
+    attempt = runtime.store.list_attempts(run_id=started.run_id)[0]
+    assert attempt.terminal_id is not None
+
+    _upsert_terminal_metadata(
+        runtime=runtime,
+        terminal_id=attempt.terminal_id,
+        last_active=datetime(2026, 4, 20, 11, 59, 30, tzinfo=timezone.utc),
+    )
+    _delete_terminal_metadata(runtime=runtime, terminal_id=attempt.terminal_id)
+
+    log_updated_at = datetime(2026, 4, 20, 11, 59, 45, tzinfo=timezone.utc)
+    runtime.store.upsert_terminal_log_offset(
+        terminal_id=attempt.terminal_id,
+        byte_offset=321,
+        updated_at=log_updated_at,
+    )
+
+    status = service.status(
+        OrchestrationStatusRequest(run_id=started.run_id, include_terminal_refs=True)
+    )
+    assert status.terminal_refs is not None
+    ref = status.terminal_refs[0]
+
+    assert ref.terminal_id == attempt.terminal_id
+    assert ref.terminal_present is False
+    assert ref.terminal_last_active_at is None
+    assert ref.log_offset == 321
+    assert ref.last_log_activity_at == log_updated_at
+    assert ref.activity_age_sec == 15
+    assert ref.tmux_session is not None
+    assert ref.tmux_window is not None
+
+
+def test_status_liveness_handles_missing_log_offset(runtime: OrchestrationRuntime) -> None:
+    factory = _TerminalFactory()
+    clock = _Clock(datetime(2026, 4, 20, 12, 0, tzinfo=timezone.utc))
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda _terminal_id: True,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+        now_fn=clock.now,
+    )
+
+    started = service.start(
+        OrchestrationStartRequest(
+            name="status-liveness-no-log-offset",
+            jobs=[
+                OrchestrationJobSpec(agent_profile="developer", message="work", role="developer")
+            ],
+        )
+    )
+    attempt = runtime.store.list_attempts(run_id=started.run_id)[0]
+    assert attempt.terminal_id is not None
+
+    terminal_last_active = datetime(2026, 4, 20, 11, 59, 25, tzinfo=timezone.utc)
+    _upsert_terminal_metadata(
+        runtime=runtime,
+        terminal_id=attempt.terminal_id,
+        last_active=terminal_last_active,
+    )
+
+    status = service.status(
+        OrchestrationStatusRequest(run_id=started.run_id, include_terminal_refs=True)
+    )
+    assert status.terminal_refs is not None
+    ref = status.terminal_refs[0]
+
+    assert ref.terminal_id == attempt.terminal_id
+    assert ref.terminal_present is True
+    assert ref.terminal_last_active_at == terminal_last_active
+    assert ref.log_offset is None
+    assert ref.last_log_activity_at is None
+    assert ref.activity_age_sec == 35
+
+
+def test_status_without_terminal_refs_remains_lean(runtime: OrchestrationRuntime) -> None:
+    factory = _TerminalFactory()
+    service = OrchestrationService(
+        runtime=runtime,
+        create_session_fn=factory,
+        send_input_fn=_noop_send_input,
+        terminal_exists_fn=lambda _terminal_id: True,
+        resolve_provider_fn=lambda _profile, _fallback: ProviderType.CODEX.value,
+    )
+
+    started = service.start(
+        OrchestrationStartRequest(
+            name="status-without-liveness",
+            jobs=[
+                OrchestrationJobSpec(agent_profile="developer", message="work", role="developer")
+            ],
+        )
+    )
+
+    status = service.status(OrchestrationStatusRequest(run_id=started.run_id))
+
+    assert status.terminal_refs is None
+    assert status.attempts is None
 
 
 def test_reconcile_startup_marks_running_attempt_failed_when_terminal_missing(

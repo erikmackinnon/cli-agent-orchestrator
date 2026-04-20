@@ -108,14 +108,34 @@ def test_orchestration_status_impl_forwards_payload_and_parses_response():
             "active_attempt_ids": [],
             "latest_event_cursor": 3,
         },
+        "terminal_refs": [
+            {
+                "attempt_id": "attempt-1",
+                "job_id": "job-1",
+                "terminal_id": "term-1",
+                "terminal_present": True,
+                "terminal_last_active_at": "2026-04-18T00:00:30Z",
+                "log_offset": 42,
+                "last_log_activity_at": "2026-04-18T00:00:45Z",
+                "activity_age_sec": 15,
+                "tmux_session": "cao-abc",
+                "tmux_window": "w-1",
+            }
+        ],
     }
 
     with patch.object(mcp_server, "_api_post_json", return_value=response) as mock_post:
-        result = mcp_server._orchestration_status_impl(run_id="run-1", include_jobs=True)
+        result = mcp_server._orchestration_status_impl(
+            run_id="run-1",
+            include_jobs=True,
+            include_terminal_refs=True,
+        )
 
     assert result["run"]["run_id"] == "run-1"
     assert result["snapshot"]["latest_event_cursor"] == 3
+    assert result["terminal_refs"][0]["attempt_id"] == "attempt-1"
     assert mock_post.call_args.args[0] == "/orchestration/status"
+    assert mock_post.call_args.kwargs["payload"]["include_terminal_refs"] is True
 
 
 def test_orchestration_cancel_impl_returns_error_for_invalid_scope_payload():

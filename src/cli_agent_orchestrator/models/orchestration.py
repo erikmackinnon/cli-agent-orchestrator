@@ -389,6 +389,22 @@ class OrchestrationStatusRequest(OrchestrationModel):
     include_terminal_refs: bool = False
 
 
+class AttemptTerminalRef(OrchestrationModel):
+    """Attempt-oriented worker terminal/log liveness reference."""
+
+    attempt_id: str
+    job_id: str
+    terminal_id: Optional[str] = None
+    terminal_present: Optional[bool] = None
+    terminal_last_active_at: Optional[datetime] = None
+    log_offset: Optional[int] = Field(default=None, ge=0)
+    last_log_activity_at: Optional[datetime] = None
+    activity_age_sec: Optional[int] = Field(default=None, ge=0)
+    tmux_session: Optional[str] = None
+    tmux_window: Optional[str] = None
+    worker_terminal_released_at: Optional[datetime] = None
+
+
 class OrchestrationStatusResponse(OrchestrationModel):
     """Response contract for orchestration_status."""
 
@@ -396,6 +412,7 @@ class OrchestrationStatusResponse(OrchestrationModel):
     snapshot: RunSnapshot
     jobs: Optional[List[JobRecord]] = None
     attempts: Optional[List[AttemptRecord]] = None
+    terminal_refs: Optional[List[AttemptTerminalRef]] = None
     events: Optional[List[OrchestrationEvent]] = None
 
 

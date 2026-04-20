@@ -19,6 +19,7 @@ from cli_agent_orchestrator.models.orchestration import (
     AttemptRecord,
     AttemptStatePayload,
     AttemptStatus,
+    AttemptTerminalRef,
     CancellationPayload,
     CancelScope,
     CleanupPolicy,
@@ -311,6 +312,9 @@ class OrchestrationService:
         include_attempts = request.include_jobs or request.include_terminal_refs
         jobs = self._store.list_jobs(run_id=request.run_id) if request.include_jobs else None
         attempts = self._store.list_attempts(run_id=request.run_id) if include_attempts else None
+        terminal_refs: Optional[List[AttemptTerminalRef]] = None
+        if request.include_terminal_refs:
+            terminal_refs = self._build_terminal_refs(run_id=request.run_id)
 
         events: Optional[List[OrchestrationEvent]] = None
         if request.include_events_since is not None:
@@ -325,6 +329,7 @@ class OrchestrationService:
             snapshot=snapshot,
             jobs=jobs,
             attempts=attempts,
+            terminal_refs=terminal_refs,
             events=events,
         )
 
@@ -1558,6 +1563,62 @@ class OrchestrationService:
             if current is None or attempt.created_at >= current.created_at:
                 latest[attempt.job_id] = attempt
         return latest
+
+    def _build_terminal_refs(self, *, run_id: str) -> List[AttemptTerminalRef]:
+        now = self._normalize_datetime(self._now())
+        if now is None:
+            raise RuntimeError("clock returned invalid timestamp")
+        refs: List[AttemptTerminalRef] = []
+        for row in self._store.list_attempt_terminal_refs(run_id=run_id):
+            terminal_last_active_at = self._normalize_datetime(row["terminal_last_active_at"])
+            last_log_activity_at = self._normalize_datetime(row["last_log_activity_at"])
+            worker_terminal_released_at = self._normalize_datetime(
+                row["worker_terminal_released_at"]
+            )
+
+            activity_anchor = self._latest_activity_timestamp(
+                terminal_last_active_at=terminal_last_active_at,
+                last_log_activity_at=last_log_activity_at,
+            )
+            activity_age_sec: Optional[int] = None
+            if activity_anchor is not None:
+                activity_age_sec = max(0, int((now - activity_anchor).total_seconds()))
+
+            refs.append(
+                AttemptTerminalRef(
+                    attempt_id=row["attempt_id"],
+                    job_id=row["job_id"],
+                    terminal_id=row["terminal_id"],
+                    terminal_present=row["terminal_present"],
+                    terminal_last_active_at=terminal_last_active_at,
+                    log_offset=row["log_offset"],
+                    last_log_activity_at=last_log_activity_at,
+                    activity_age_sec=activity_age_sec,
+                    tmux_session=row["tmux_session"],
+                    tmux_window=row["tmux_window"],
+                    worker_terminal_released_at=worker_terminal_released_at,
+                )
+            )
+        return refs
+
+    @staticmethod
+    def _latest_activity_timestamp(
+        *,
+        terminal_last_active_at: Optional[datetime],
+        last_log_activity_at: Optional[datetime],
+    ) -> Optional[datetime]:
+        candidates = [value for value in (terminal_last_active_at, last_log_activity_at) if value]
+        if not candidates:
+            return None
+        return max(candidates)
+
+    @staticmethod
+    def _normalize_datetime(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.astimezone(timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def _is_reviewer(self, job: JobRecord) -> bool:
         return (job.role or "").strip().lower() == "reviewer"
