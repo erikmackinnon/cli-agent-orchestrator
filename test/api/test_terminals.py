@@ -118,6 +118,36 @@ class TestSessionCreationWithWorkingDirectory:
             call_kwargs = mock_svc.create_session.call_args.kwargs
             assert call_kwargs.get("working_directory") == "/custom/path"
 
+    def test_create_session_passes_orchestration_context(self, client):
+        """Test that optional orchestration callback context is forwarded."""
+        with patch("cli_agent_orchestrator.api.main.session_service") as mock_svc:
+            mock_svc.create_session.return_value = Terminal(
+                id="abcd1234",
+                name="test-window",
+                session_name="test-session",
+                provider="q_cli",
+                agent_profile="developer",
+            )
+
+            response = client.post(
+                "/sessions",
+                params={
+                    "provider": "q_cli",
+                    "agent_profile": "developer",
+                    "orchestration_run_id": "run-1",
+                    "orchestration_job_id": "job-1",
+                    "orchestration_attempt_id": "attempt-1",
+                    "orchestration_chain_id": "chain-1",
+                },
+            )
+
+            assert response.status_code == 201
+            call_kwargs = mock_svc.create_session.call_args.kwargs
+            assert call_kwargs.get("orchestration_run_id") == "run-1"
+            assert call_kwargs.get("orchestration_job_id") == "job-1"
+            assert call_kwargs.get("orchestration_attempt_id") == "attempt-1"
+            assert call_kwargs.get("orchestration_chain_id") == "chain-1"
+
 
 class TestTerminalCreationWithWorkingDirectory:
     """Test terminal creation with working_directory parameter."""
@@ -181,6 +211,42 @@ class TestTerminalCreationWithWorkingDirectory:
             assert response.status_code == 201
             call_kwargs = mock_svc.create_terminal.call_args.kwargs
             assert call_kwargs.get("working_directory") == "/session/path"
+
+    def test_create_terminal_in_session_passes_orchestration_context(self, client):
+        """Test that terminal creation forwards orchestration callback context."""
+        with (
+            patch(
+                "cli_agent_orchestrator.api.main.resolve_provider",
+                side_effect=lambda _, fallback_provider: fallback_provider,
+            ),
+            patch("cli_agent_orchestrator.api.main.terminal_service") as mock_svc,
+        ):
+            mock_svc.create_terminal.return_value = Terminal(
+                id="abcd5678",
+                name="test-window",
+                session_name="test-session",
+                provider="q_cli",
+                agent_profile="analyst",
+            )
+
+            response = client.post(
+                "/sessions/test-session/terminals",
+                params={
+                    "provider": "q_cli",
+                    "agent_profile": "analyst",
+                    "orchestration_run_id": "run-1",
+                    "orchestration_job_id": "job-1",
+                    "orchestration_attempt_id": "attempt-1",
+                    "orchestration_chain_id": "chain-1",
+                },
+            )
+
+            assert response.status_code == 201
+            call_kwargs = mock_svc.create_terminal.call_args.kwargs
+            assert call_kwargs.get("orchestration_run_id") == "run-1"
+            assert call_kwargs.get("orchestration_job_id") == "job-1"
+            assert call_kwargs.get("orchestration_attempt_id") == "attempt-1"
+            assert call_kwargs.get("orchestration_chain_id") == "chain-1"
 
 
 class TestExitTerminalEndpoint:

@@ -1,7 +1,9 @@
 """Minimal database client with only terminal metadata."""
 
 import logging
+import sqlite3
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import Boolean, Column, DateTime, Integer, String, create_engine
@@ -68,26 +70,185 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 def init_db() -> None:
     """Initialize database tables and apply schema migrations."""
     Base.metadata.create_all(bind=engine)
-    _migrate_add_allowed_tools()
+    run_schema_migrations()
 
 
-def _migrate_add_allowed_tools() -> None:
-    """Add allowed_tools column to terminals table if missing (schema migration)."""
-    import sqlite3
+def run_schema_migrations(database_file: Optional[Path] = None) -> None:
+    """Apply idempotent SQLite schema migrations.
 
+    Args:
+        database_file: Optional database path override for tests.
+    """
     from cli_agent_orchestrator.constants import DATABASE_FILE
 
-    try:
-        conn = sqlite3.connect(str(DATABASE_FILE))
-        cursor = conn.execute("PRAGMA table_info(terminals)")
-        columns = {row[1] for row in cursor.fetchall()}
-        if "allowed_tools" not in columns:
-            conn.execute("ALTER TABLE terminals ADD COLUMN allowed_tools TEXT")
-            conn.commit()
-            logger.info("Migration: added allowed_tools column to terminals table")
-        conn.close()
-    except Exception as e:
-        logger.warning(f"Migration check for allowed_tools failed: {e}")
+    target_db = database_file or DATABASE_FILE
+
+    with sqlite3.connect(str(target_db)) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        _migrate_add_allowed_tools(conn)
+        _migrate_orchestration_schema(conn)
+        conn.commit()
+
+
+def _migrate_add_allowed_tools(conn: sqlite3.Connection) -> None:
+    """Add allowed_tools column to terminals table if missing."""
+    cursor = conn.execute("PRAGMA table_info(terminals)")
+    columns = {row[1] for row in cursor.fetchall()}
+    if not columns:
+        return
+    if "allowed_tools" not in columns:
+        conn.execute("ALTER TABLE terminals ADD COLUMN allowed_tools TEXT")
+        logger.info("Migration: added allowed_tools column to terminals table")
+
+
+def _migrate_orchestration_schema(conn: sqlite3.Connection) -> None:
+    """Create orchestration tables and indexes with idempotent DDL."""
+    ddl_statements = [
+        """
+        CREATE TABLE IF NOT EXISTS orchestration_runs (
+            run_id TEXT PRIMARY KEY,
+            name TEXT,
+            status TEXT NOT NULL,
+            metadata TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            finalized_at TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS orchestration_jobs (
+            job_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            agent_profile TEXT NOT NULL,
+            message TEXT NOT NULL,
+            status TEXT NOT NULL,
+            role TEXT,
+            kind TEXT,
+            parent_job_id TEXT,
+            chain_id TEXT,
+            timeout_sec INTEGER,
+            idempotency_key TEXT,
+            metadata TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES orchestration_runs(run_id) ON DELETE CASCADE
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS orchestration_attempts (
+            attempt_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            status TEXT NOT NULL,
+            terminal_id TEXT,
+            nonce TEXT,
+            result_summary TEXT,
+            result_data TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            started_at TEXT,
+            completed_at TEXT,
+            FOREIGN KEY (run_id) REFERENCES orchestration_runs(run_id) ON DELETE CASCADE,
+            FOREIGN KEY (job_id) REFERENCES orchestration_jobs(job_id) ON DELETE CASCADE
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS orchestration_events (
+            event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id TEXT NOT NULL,
+            job_id TEXT,
+            attempt_id TEXT,
+            event_type TEXT NOT NULL,
+            payload TEXT NOT NULL,
+            dedupe_key TEXT,
+            created_at TEXT NOT NULL,
+            FOREIGN KEY (run_id) REFERENCES orchestration_runs(run_id) ON DELETE CASCADE,
+            FOREIGN KEY (job_id) REFERENCES orchestration_jobs(job_id) ON DELETE SET NULL,
+            FOREIGN KEY (attempt_id) REFERENCES orchestration_attempts(attempt_id) ON DELETE SET NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS worker_terminals (
+            terminal_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            job_id TEXT NOT NULL,
+            attempt_id TEXT NOT NULL,
+            provider TEXT,
+            tmux_session TEXT,
+            tmux_window TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            released_at TEXT,
+            FOREIGN KEY (run_id) REFERENCES orchestration_runs(run_id) ON DELETE CASCADE,
+            FOREIGN KEY (job_id) REFERENCES orchestration_jobs(job_id) ON DELETE CASCADE,
+            FOREIGN KEY (attempt_id) REFERENCES orchestration_attempts(attempt_id) ON DELETE CASCADE
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS orchestration_subscriptions (
+            subscription_id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL,
+            subscriber_id TEXT NOT NULL,
+            cursor INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            UNIQUE (run_id, subscriber_id),
+            FOREIGN KEY (run_id) REFERENCES orchestration_runs(run_id) ON DELETE CASCADE
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS orchestration_log_offsets (
+            terminal_id TEXT PRIMARY KEY,
+            byte_offset INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_orch_jobs_run ON orchestration_jobs(run_id)",
+        "CREATE INDEX IF NOT EXISTS idx_orch_jobs_run_status ON orchestration_jobs(run_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_orch_jobs_parent ON orchestration_jobs(run_id, parent_job_id)",
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_jobs_run_idem
+        ON orchestration_jobs(run_id, idempotency_key)
+        WHERE idempotency_key IS NOT NULL
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_orch_attempts_run ON orchestration_attempts(run_id)",
+        """
+        CREATE INDEX IF NOT EXISTS idx_orch_attempts_run_status
+        ON orchestration_attempts(run_id, status)
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_orch_attempts_job ON orchestration_attempts(job_id)",
+        "CREATE INDEX IF NOT EXISTS idx_orch_attempts_terminal ON orchestration_attempts(terminal_id)",
+        "CREATE INDEX IF NOT EXISTS idx_orch_events_run_cursor ON orchestration_events(run_id, event_id)",
+        """
+        CREATE INDEX IF NOT EXISTS idx_orch_events_run_type_cursor
+        ON orchestration_events(run_id, event_type, event_id)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_orch_events_run_job_cursor
+        ON orchestration_events(run_id, job_id, event_id)
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_orch_events_run_dedupe
+        ON orchestration_events(run_id, dedupe_key)
+        WHERE dedupe_key IS NOT NULL
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_worker_terminals_run ON worker_terminals(run_id)",
+        """
+        CREATE INDEX IF NOT EXISTS idx_worker_terminals_run_active
+        ON worker_terminals(run_id, released_at)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_orch_subscriptions_run_subscriber
+        ON orchestration_subscriptions(run_id, subscriber_id)
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_orch_log_offsets_updated_at
+        ON orchestration_log_offsets(updated_at)
+        """,
+    ]
+
+    for statement in ddl_statements:
+        conn.execute(statement)
 
 
 def create_terminal(

@@ -9,11 +9,25 @@ from uuid import uuid4
 
 import requests
 from fastmcp import FastMCP
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from cli_agent_orchestrator.constants import API_BASE_URL, DEFAULT_PROVIDER
 from cli_agent_orchestrator.mcp_server.models import HandoffResult
 from cli_agent_orchestrator.models.inbox import OrchestrationType
+from cli_agent_orchestrator.models.orchestration import (
+    OrchestrationCancelRequest,
+    OrchestrationCancelResponse,
+    OrchestrationFinalizeRequest,
+    OrchestrationFinalizeResponse,
+    OrchestrationSpawnRequest,
+    OrchestrationSpawnResponse,
+    OrchestrationStartRequest,
+    OrchestrationStartResponse,
+    OrchestrationStatusRequest,
+    OrchestrationStatusResponse,
+    OrchestrationWaitRequest,
+    OrchestrationWaitResponse,
+)
 from cli_agent_orchestrator.models.terminal import TerminalStatus
 from cli_agent_orchestrator.utils.terminal import generate_session_name, wait_until_terminal_status
 
@@ -158,6 +172,25 @@ def _api_post(
         raise RuntimeError(f"API POST failed: {url} ({e})") from e
 
 
+def _api_post_json(path: str, *, payload: Dict[str, Any], timeout: Optional[float] = None):
+    """Issue a JSON POST to CAO API with bounded timeout and actionable errors."""
+    url = f"{API_BASE_URL}{path}"
+    timeout_sec = timeout if timeout is not None else API_REQUEST_TIMEOUT_SECONDS
+    try:
+        response = requests.post(url, json=payload, timeout=timeout_sec)
+        response.raise_for_status()
+        return response
+    except requests.Timeout as e:
+        raise RuntimeError(f"API POST timed out after {timeout_sec}s: {url}") from e
+    except requests.HTTPError as e:
+        detail = str(e)
+        if e.response is not None:
+            detail = _extract_error_detail(e.response, detail)
+        raise RuntimeError(f"API POST failed: {url} ({detail})") from e
+    except requests.RequestException as e:
+        raise RuntimeError(f"API POST failed: {url} ({e})") from e
+
+
 def _api_delete(
     path: str, *, params: Optional[Dict[str, Any]] = None, timeout: Optional[float] = None
 ):
@@ -175,13 +208,22 @@ def _api_delete(
 
 
 def _create_terminal(
-    agent_profile: str, working_directory: Optional[str] = None
+    agent_profile: str,
+    working_directory: Optional[str] = None,
+    orchestration_run_id: Optional[str] = None,
+    orchestration_job_id: Optional[str] = None,
+    orchestration_attempt_id: Optional[str] = None,
+    orchestration_chain_id: Optional[str] = None,
 ) -> Tuple[str, str]:
     """Create a new terminal with the specified agent profile.
 
     Args:
         agent_profile: Agent profile for the terminal
         working_directory: Optional working directory for the terminal
+        orchestration_run_id: Optional orchestration run ID for callback prompt injection
+        orchestration_job_id: Optional orchestration job ID for callback prompt injection
+        orchestration_attempt_id: Optional orchestration attempt ID for callback prompt injection
+        orchestration_chain_id: Optional orchestration chain ID for callback prompt injection
 
     Returns:
         Tuple of (terminal_id, provider)
@@ -226,6 +268,14 @@ def _create_terminal(
             params["working_directory"] = working_directory
         if child_allowed_tools:
             params["allowed_tools"] = child_allowed_tools
+        if orchestration_run_id:
+            params["orchestration_run_id"] = orchestration_run_id
+        if orchestration_job_id:
+            params["orchestration_job_id"] = orchestration_job_id
+        if orchestration_attempt_id:
+            params["orchestration_attempt_id"] = orchestration_attempt_id
+        if orchestration_chain_id:
+            params["orchestration_chain_id"] = orchestration_chain_id
 
         terminal = _api_post(f"/sessions/{session_name}/terminals", params=params).json()
     else:
@@ -238,6 +288,14 @@ def _create_terminal(
         }
         if working_directory:
             params["working_directory"] = working_directory
+        if orchestration_run_id:
+            params["orchestration_run_id"] = orchestration_run_id
+        if orchestration_job_id:
+            params["orchestration_job_id"] = orchestration_job_id
+        if orchestration_attempt_id:
+            params["orchestration_attempt_id"] = orchestration_attempt_id
+        if orchestration_chain_id:
+            params["orchestration_chain_id"] = orchestration_chain_id
 
         terminal = _api_post("/sessions", params=params).json()
 
@@ -810,6 +868,334 @@ else:
         message: str = Field(description=_assign_message_field_desc),
     ) -> Dict[str, Any]:
         return _assign_impl(agent_profile, message, None)
+
+
+def _orchestration_start_impl(
+    *,
+    name: Optional[str] = None,
+    jobs: Optional[list[Dict[str, Any]]] = None,
+    policy: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate and forward orchestration_start to cao-server."""
+    try:
+        request = OrchestrationStartRequest.model_validate(
+            {
+                "name": name,
+                "jobs": jobs if jobs is not None else [],
+                "policy": policy,
+                "metadata": metadata,
+            }
+        )
+        response = _api_post_json(
+            "/orchestration/start",
+            payload=request.model_dump(mode="json", exclude_none=True),
+        )
+        return OrchestrationStartResponse.model_validate(response.json()).model_dump(
+            mode="json", exclude_none=True
+        )
+    except (ValidationError, RuntimeError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def _orchestration_spawn_impl(
+    *,
+    run_id: str,
+    agent_profile: str,
+    message: str,
+    parent_job_id: Optional[str] = None,
+    chain_id: Optional[str] = None,
+    role: Optional[str] = None,
+    kind: Optional[str] = None,
+    timeout_sec: Optional[int] = None,
+    idempotency_key: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate and forward orchestration_spawn to cao-server."""
+    try:
+        request = OrchestrationSpawnRequest.model_validate(
+            {
+                "run_id": run_id,
+                "agent_profile": agent_profile,
+                "message": message,
+                "parent_job_id": parent_job_id,
+                "chain_id": chain_id,
+                "role": role,
+                "kind": kind,
+                "timeout_sec": timeout_sec,
+                "idempotency_key": idempotency_key,
+                "metadata": metadata,
+            }
+        )
+        response = _api_post_json(
+            "/orchestration/spawn",
+            payload=request.model_dump(mode="json", exclude_none=True),
+        )
+        return OrchestrationSpawnResponse.model_validate(response.json()).model_dump(
+            mode="json", exclude_none=True
+        )
+    except (ValidationError, RuntimeError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def _orchestration_wait_impl(
+    *,
+    run_id: str,
+    cursor: Optional[int] = None,
+    event_types: Optional[list[str]] = None,
+    job_ids: Optional[list[str]] = None,
+    min_events: int = 1,
+    max_events: int = 10,
+    wait_timeout_sec: int = 45,
+    include_snapshot: bool = True,
+) -> Dict[str, Any]:
+    """Validate and forward orchestration_wait to cao-server."""
+    try:
+        request = OrchestrationWaitRequest.model_validate(
+            {
+                "run_id": run_id,
+                "cursor": cursor,
+                "event_types": event_types,
+                "job_ids": job_ids,
+                "min_events": min_events,
+                "max_events": max_events,
+                "wait_timeout_sec": wait_timeout_sec,
+                "include_snapshot": include_snapshot,
+            }
+        )
+        # orchestration_wait is intentionally long-polling; keep HTTP timeout above wait timeout.
+        request_timeout = max(API_REQUEST_TIMEOUT_SECONDS, float(request.wait_timeout_sec) + 5.0)
+        response = _api_post_json(
+            "/orchestration/wait",
+            payload=request.model_dump(mode="json", exclude_none=True),
+            timeout=request_timeout,
+        )
+        return OrchestrationWaitResponse.model_validate(response.json()).model_dump(
+            mode="json", exclude_none=True
+        )
+    except (ValidationError, RuntimeError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def _orchestration_status_impl(
+    *,
+    run_id: str,
+    include_jobs: bool = False,
+    include_events_since: Optional[int] = None,
+    include_terminal_refs: bool = False,
+) -> Dict[str, Any]:
+    """Validate and forward orchestration_status to cao-server."""
+    try:
+        request = OrchestrationStatusRequest.model_validate(
+            {
+                "run_id": run_id,
+                "include_jobs": include_jobs,
+                "include_events_since": include_events_since,
+                "include_terminal_refs": include_terminal_refs,
+            }
+        )
+        response = _api_post_json(
+            "/orchestration/status",
+            payload=request.model_dump(mode="json", exclude_none=True),
+        )
+        return OrchestrationStatusResponse.model_validate(response.json()).model_dump(
+            mode="json", exclude_none=True
+        )
+    except (ValidationError, RuntimeError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def _orchestration_cancel_impl(
+    *,
+    run_id: str,
+    scope: str,
+    job_id: Optional[str] = None,
+    reason: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validate and forward orchestration_cancel to cao-server."""
+    try:
+        request = OrchestrationCancelRequest.model_validate(
+            {
+                "run_id": run_id,
+                "scope": scope,
+                "job_id": job_id,
+                "reason": reason,
+            }
+        )
+        response = _api_post_json(
+            "/orchestration/cancel",
+            payload=request.model_dump(mode="json", exclude_none=True),
+        )
+        return OrchestrationCancelResponse.model_validate(response.json()).model_dump(
+            mode="json", exclude_none=True
+        )
+    except (ValidationError, RuntimeError) as e:
+        return {"success": False, "error": str(e)}
+
+
+def _orchestration_finalize_impl(
+    *,
+    run_id: str,
+    outcome: str,
+    summary: Optional[str] = None,
+    cleanup_policy: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Validate and forward orchestration_finalize to cao-server."""
+    try:
+        request = OrchestrationFinalizeRequest.model_validate(
+            {
+                "run_id": run_id,
+                "outcome": outcome,
+                "summary": summary,
+                "cleanup_policy": cleanup_policy,
+            }
+        )
+        response = _api_post_json(
+            "/orchestration/finalize",
+            payload=request.model_dump(mode="json", exclude_none=True),
+        )
+        return OrchestrationFinalizeResponse.model_validate(response.json()).model_dump(
+            mode="json", exclude_none=True
+        )
+    except (ValidationError, RuntimeError) as e:
+        return {"success": False, "error": str(e)}
+
+
+@mcp.tool()
+async def orchestration_start(
+    name: Optional[str] = Field(default=None, description="Optional run name"),
+    jobs: Optional[list[Dict[str, Any]]] = Field(
+        default=None,
+        description="Optional initial job specs for the run",
+    ),
+    policy: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional run policy overrides",
+    ),
+    metadata: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional run metadata",
+    ),
+) -> Dict[str, Any]:
+    """Start a run and optionally enqueue initial jobs."""
+    return _orchestration_start_impl(name=name, jobs=jobs, policy=policy, metadata=metadata)
+
+
+@mcp.tool()
+async def orchestration_spawn(
+    run_id: str = Field(description="Run ID receiving the new job"),
+    agent_profile: str = Field(description="Worker agent profile to spawn"),
+    message: str = Field(description="Task message for the worker"),
+    parent_job_id: Optional[str] = Field(default=None, description="Optional parent job ID"),
+    chain_id: Optional[str] = Field(default=None, description="Optional chain/group ID"),
+    role: Optional[str] = Field(default=None, description="Optional role classification"),
+    kind: Optional[str] = Field(default=None, description="Optional kind classification"),
+    timeout_sec: Optional[int] = Field(default=None, ge=1, description="Optional job timeout"),
+    idempotency_key: Optional[str] = Field(default=None, description="Optional dedupe key"),
+    metadata: Optional[Dict[str, Any]] = Field(default=None, description="Optional job metadata"),
+) -> Dict[str, Any]:
+    """Spawn one new job under an existing orchestration run."""
+    return _orchestration_spawn_impl(
+        run_id=run_id,
+        agent_profile=agent_profile,
+        message=message,
+        parent_job_id=parent_job_id,
+        chain_id=chain_id,
+        role=role,
+        kind=kind,
+        timeout_sec=timeout_sec,
+        idempotency_key=idempotency_key,
+        metadata=metadata,
+    )
+
+
+@mcp.tool()
+async def orchestration_wait(
+    run_id: str = Field(description="Run ID to wait on"),
+    cursor: Optional[int] = Field(default=None, ge=0, description="Previous event cursor"),
+    event_types: Optional[list[str]] = Field(
+        default=None,
+        description="Optional event type filters",
+    ),
+    job_ids: Optional[list[str]] = Field(default=None, description="Optional job filters"),
+    min_events: int = Field(default=1, ge=1, description="Minimum events before returning"),
+    max_events: int = Field(default=10, ge=1, description="Maximum events to return"),
+    wait_timeout_sec: int = Field(
+        default=45,
+        ge=1,
+        description="Long-poll wait timeout in seconds",
+    ),
+    include_snapshot: bool = Field(default=True, description="Include run snapshot in response"),
+) -> Dict[str, Any]:
+    """Wait for orchestration events with bounded blocking semantics."""
+    return _orchestration_wait_impl(
+        run_id=run_id,
+        cursor=cursor,
+        event_types=event_types,
+        job_ids=job_ids,
+        min_events=min_events,
+        max_events=max_events,
+        wait_timeout_sec=wait_timeout_sec,
+        include_snapshot=include_snapshot,
+    )
+
+
+@mcp.tool()
+async def orchestration_status(
+    run_id: str = Field(description="Run ID to inspect"),
+    include_jobs: bool = Field(default=False, description="Include job and attempt records"),
+    include_events_since: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Include events newer than this cursor",
+    ),
+    include_terminal_refs: bool = Field(
+        default=False,
+        description="Include attempt terminal references",
+    ),
+) -> Dict[str, Any]:
+    """Get current run snapshot and optional expanded status details."""
+    return _orchestration_status_impl(
+        run_id=run_id,
+        include_jobs=include_jobs,
+        include_events_since=include_events_since,
+        include_terminal_refs=include_terminal_refs,
+    )
+
+
+@mcp.tool()
+async def orchestration_cancel(
+    run_id: str = Field(description="Run ID to cancel against"),
+    scope: str = Field(description="Cancellation scope: run or job"),
+    job_id: Optional[str] = Field(default=None, description="Required when scope=job"),
+    reason: Optional[str] = Field(default=None, description="Optional cancellation reason"),
+) -> Dict[str, Any]:
+    """Cancel orchestration work at run/job scope."""
+    return _orchestration_cancel_impl(
+        run_id=run_id,
+        scope=scope,
+        job_id=job_id,
+        reason=reason,
+    )
+
+
+@mcp.tool()
+async def orchestration_finalize(
+    run_id: str = Field(description="Run ID to finalize"),
+    outcome: str = Field(description="Final outcome: succeeded, failed, or cancelled"),
+    summary: Optional[str] = Field(default=None, description="Optional run summary"),
+    cleanup_policy: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Optional cleanup policy override",
+    ),
+) -> Dict[str, Any]:
+    """Finalize a run explicitly with outcome and optional cleanup policy."""
+    return _orchestration_finalize_impl(
+        run_id=run_id,
+        outcome=outcome,
+        summary=summary,
+        cleanup_policy=cleanup_policy,
+    )
 
 
 # Implementation function for send_message

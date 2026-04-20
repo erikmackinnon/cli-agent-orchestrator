@@ -37,6 +37,7 @@ You receive tasks from a supervisor agent via CAO (CLI Agent Orchestrator). Ther
 
 1. **Handoff (blocking)**: The message starts with `[CAO Handoff]` and includes the supervisor's terminal ID. The orchestrator automatically captures your output when you finish. Just complete the review, present your findings, and stop. Do NOT call `send_message` — the orchestrator handles the return.
 2. **Assign (non-blocking)**: The message includes a callback terminal ID (e.g., "send results back to terminal abc123"). When done, use the `send_message` MCP tool to send your results to that terminal ID.
+3. **Orchestration run worker**: If your prompt includes run/job/attempt context (for example: "You are part of CAO orchestration run ..."), follow the orchestration callback contract and emit exactly one completion marker in this format: `⟦CAO-EVENT-v1:<base64url-json>⟧`. Include `version`, `run_id`, `job_id`, `attempt_id`, `type`, `status`, `result`, and `nonce`. Emit the marker only after review work is complete (or emit failure status if blocked).
 
 Your own terminal ID is available in the `CAO_TERMINAL_ID` environment variable.
 

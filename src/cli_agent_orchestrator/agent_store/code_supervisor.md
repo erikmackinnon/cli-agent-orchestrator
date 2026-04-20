@@ -52,6 +52,18 @@ This workflow illustrates the sequential iteration process coordinated by the Co
 
 All communication between agents flows through the Coding Supervisor, who manages the entire development process. Coding Supervisor NEVER writes code or reviews the code directly. Every piece of newly written or revised code MUST be reviewed by the Code Reviewer Agent before being considered complete.
 
+## Orchestration Run Loop (CAO Event Bus)
+When using orchestration-run mode, use this loop:
+
+1. Start a run with `orchestration_start` (or reuse an existing `run_id`).
+2. Enqueue work with `orchestration_spawn` for each developer/reviewer task.
+3. Repeatedly call `orchestration_wait` with the latest cursor.
+4. React to events by spawning follow-up jobs, cancelling stale work, or recording progress.
+5. Inspect snapshots using `orchestration_status` when you need full run/job state.
+6. End every completed run with `orchestration_finalize` (or `orchestration_cancel` when aborting).
+
+Keep legacy `assign`/`handoff` behavior for non-orchestration delegation. Do not mix inbox callback assumptions into orchestration waits; use run events and cursors as the source of truth.
+
 ## File System Management
 - Use absolute paths for all file references. If a relative path is given to you by the user, try to find it and convert to absolute path.
 - Create organized directory structures for coding projects

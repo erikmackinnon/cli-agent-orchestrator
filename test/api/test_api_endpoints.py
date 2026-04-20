@@ -258,6 +258,10 @@ class TestCreateSession:
             session_name=None,
             working_directory=None,
             allowed_tools=None,
+            orchestration_run_id=None,
+            orchestration_job_id=None,
+            orchestration_attempt_id=None,
+            orchestration_chain_id=None,
             registry=ANY,
         )
 
@@ -874,7 +878,7 @@ class TestLifespan:
         ):
             async with lifespan(app):
                 # Inside the lifespan — startup completed
-                mock_observer.schedule.assert_called_once()
+                assert mock_observer.schedule.call_count == 2
                 mock_observer.start.assert_called_once()
 
             # After exit — shutdown cleanup

@@ -10,6 +10,18 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-18**: Completed orchestration recovery/reaper and Codex starter proof (W13/W16/W17):
+  - added startup reconciliation for running attempts, periodic terminal reaper cleanup for finalized/cancelled/timed-out runs (including TTL retention handling), a Codex-focused orchestration starter-scenario e2e (`4 dev -> review -> reject -> fix -> approve -> finalize` via repeated blocking waits), and final operator docs for orchestration usage/config/deferred limits
+- **2026-04-18**: Exposed orchestration run lifecycle on public server surfaces (W11/W12/W14/W15):
+  - added typed `/orchestration/*` HTTP endpoints (`start`, `spawn`, `wait`, `status`, `cancel`, `finalize`), thin MCP pass-through tools (`orchestration_*`), supervisor/worker protocol guidance for event-bus loops and callback markers, and targeted API/MCP orchestration tests
+- **2026-04-18**: Implemented core orchestration engine lifecycle (W7/W8/W9/W10):
+  - added a server-owned orchestration scheduler with attempt tracking, bounded event-cursor waits, deterministic job/run timeout + cancel handling, and explicit `run.idle` vs `run.finalized` transitions with finalization cleanup policy support
+- **2026-04-18**: Added orchestration runtime bootstrap and callback ingestion layer (W4/W5/W6):
+  - wired a server-owned orchestration runtime into `cao-server` lifespan with per-run in-process wakeup signaling and separate log-based callback marker ingestion (`⟦CAO-EVENT-v1:<base64url-json>⟧`) that normalizes and dedupes durable lifecycle events
+- **2026-04-18**: Added Phase 0 orchestration persistence foundation (W2/W3):
+  - introduced idempotent SQLite migrations for orchestration run/job/attempt/event/subscription/worker-terminal tables and a dedicated orchestration store with cursor-based event reads and append-only dedupe support
+- **2026-04-18**: Added Phase 0 orchestration event-bus contracts and scope freeze:
+  - documented branch merge gates/non-goals in a dedicated ADR and introduced shared typed models for run/job/attempt/event contracts plus six orchestration request/response surfaces
 - **2026-04-18**: Integrated upstream external plugin framework while preserving fork handoff semantics:
   - merged plugin lifecycle/event dispatch infrastructure and kept explicit handoff callback protocol behavior
 - **2026-04-18**: Synced upstream safely while deferring plugin-integration conflict:
@@ -387,6 +399,7 @@ The `cao-server` runs on `http://localhost:9889` by default and exposes REST API
 You can combine the three orchestration modes above into custom workflows, or create entirely new orchestration patterns using the underlying APIs to fit your specific needs.
 
 For complete API documentation, see [docs/api.md](docs/api.md).
+For the new run/event-bus orchestration lifecycle (`orchestration_start/spawn/wait/status/cancel/finalize`), recovery/reaper semantics, and Codex timeout guidance, see [docs/orchestration-event-bus.md](docs/orchestration-event-bus.md).
 
 ## Flows - Scheduled Agent Sessions
 

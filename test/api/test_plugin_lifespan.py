@@ -6,13 +6,23 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import Request
 
-from cli_agent_orchestrator.api.main import app, get_plugin_registry, lifespan
+from cli_agent_orchestrator.api.main import (
+    app,
+    get_orchestration_runtime,
+    get_plugin_registry,
+    lifespan,
+)
 from cli_agent_orchestrator.plugins import CaoPlugin, PluginRegistry, hook
 from cli_agent_orchestrator.plugins.events import PostSendMessageEvent
+from cli_agent_orchestrator.services.orchestration_service import OrchestrationService
 
 
 async def fake_flow_daemon() -> None:
     """Minimal async flow daemon stub for lifespan tests."""
+
+
+async def fake_reaper_daemon(*_args, **_kwargs) -> None:
+    """Minimal async orchestration reaper daemon stub for lifespan tests."""
 
 
 class TestPluginRegistryLifespan:
@@ -26,6 +36,7 @@ class TestPluginRegistryLifespan:
         ordering: list[str] = []
         mock_load = AsyncMock()
         mock_teardown = AsyncMock()
+        mock_reconcile = MagicMock()
         mock_load.side_effect = lambda: ordering.append("registry_load")
         mock_observer.schedule.side_effect = lambda *args, **kwargs: ordering.append(
             "observer_schedule"
@@ -42,6 +53,10 @@ class TestPluginRegistryLifespan:
                 return_value=mock_observer,
             ),
             patch("cli_agent_orchestrator.api.main.flow_daemon", fake_flow_daemon),
+            patch(
+                "cli_agent_orchestrator.api.main.orchestration_reaper_daemon", fake_reaper_daemon
+            ),
+            patch.object(OrchestrationService, "reconcile_startup", mock_reconcile),
             patch.object(PluginRegistry, "load", mock_load),
             patch.object(PluginRegistry, "teardown", mock_teardown),
         ):
@@ -51,14 +66,19 @@ class TestPluginRegistryLifespan:
                 assert isinstance(registry, PluginRegistry)
                 assert get_plugin_registry(Request(request_scope)) is registry
                 assert get_plugin_registry(Request(dict(request_scope))) is registry
+                runtime = get_orchestration_runtime(Request(dict(request_scope)))
+                assert runtime is app.state.orchestration_runtime
+                assert runtime.is_running() is True
+                mock_reconcile.assert_called_once()
                 mock_load.assert_awaited_once()
-                mock_observer.schedule.assert_called_once()
+                assert mock_observer.schedule.call_count == 2
                 mock_observer.start.assert_called_once()
-                assert ordering == ["registry_load", "observer_schedule"]
+                assert ordering == ["registry_load", "observer_schedule", "observer_schedule"]
 
             mock_teardown.assert_awaited_once()
             mock_observer.stop.assert_called_once()
             mock_observer.join.assert_called_once()
+            assert app.state.orchestration_runtime.is_running() is False
 
     @pytest.mark.asyncio
     async def test_lifespan_logs_no_plugins_registered_when_entry_points_are_empty(
@@ -77,6 +97,9 @@ class TestPluginRegistryLifespan:
                 return_value=mock_observer,
             ),
             patch("cli_agent_orchestrator.api.main.flow_daemon", fake_flow_daemon),
+            patch(
+                "cli_agent_orchestrator.api.main.orchestration_reaper_daemon", fake_reaper_daemon
+            ),
             patch("importlib.metadata.entry_points", return_value=[]),
         ):
             with caplog.at_level(logging.INFO, logger="cli_agent_orchestrator.plugins.registry"):
@@ -109,6 +132,9 @@ class TestPluginRegistryLifespan:
                 return_value=mock_observer,
             ),
             patch("cli_agent_orchestrator.api.main.flow_daemon", fake_flow_daemon),
+            patch(
+                "cli_agent_orchestrator.api.main.orchestration_reaper_daemon", fake_reaper_daemon
+            ),
             patch(
                 "importlib.metadata.entry_points",
                 return_value=[

@@ -41,6 +41,9 @@ from cli_agent_orchestrator.plugins import (
     PostSendMessageEvent,
 )
 from cli_agent_orchestrator.providers.manager import provider_manager
+from cli_agent_orchestrator.services.orchestration_callbacks import (
+    build_orchestration_worker_instructions,
+)
 from cli_agent_orchestrator.services.plugin_dispatch import dispatch_plugin_event
 from cli_agent_orchestrator.utils.agent_profiles import load_agent_profile
 from cli_agent_orchestrator.utils.skills import build_skill_catalog
@@ -75,6 +78,35 @@ RUNTIME_SKILL_PROMPT_PROVIDERS = {
 }
 
 
+def _build_runtime_prompt(
+    *,
+    orchestration_run_id: str | None = None,
+    orchestration_job_id: str | None = None,
+    orchestration_attempt_id: str | None = None,
+    orchestration_chain_id: str | None = None,
+) -> str:
+    """Build runtime prompt fragments for providers that support skill_prompt."""
+    prompt_parts: list[str] = []
+
+    skill_catalog = build_skill_catalog()
+    if skill_catalog:
+        prompt_parts.append(skill_catalog)
+
+    # Add callback protocol guidance when required orchestration context is provided.
+    # chain_id is optional in orchestration contracts.
+    if orchestration_run_id and orchestration_job_id and orchestration_attempt_id:
+        prompt_parts.append(
+            build_orchestration_worker_instructions(
+                run_id=orchestration_run_id,
+                job_id=orchestration_job_id,
+                attempt_id=orchestration_attempt_id,
+                chain_id=orchestration_chain_id,
+            )
+        )
+
+    return "\n\n".join(prompt_parts)
+
+
 def create_terminal(
     provider: str,
     agent_profile: str,
@@ -82,6 +114,10 @@ def create_terminal(
     new_session: bool = False,
     working_directory: Optional[str] = None,
     allowed_tools: Optional[list[str]] = None,
+    orchestration_run_id: str | None = None,
+    orchestration_job_id: str | None = None,
+    orchestration_attempt_id: str | None = None,
+    orchestration_chain_id: str | None = None,
     registry: PluginRegistry | None = None,
 ) -> Terminal:
     """Create a new terminal with an initialized CLI agent.
@@ -148,7 +184,12 @@ def create_terminal(
             profile = load_agent_profile(agent_profile)
         except FileNotFoundError:
             profile = None
-        skill_prompt = build_skill_catalog()
+        skill_prompt = _build_runtime_prompt(
+            orchestration_run_id=orchestration_run_id,
+            orchestration_job_id=orchestration_job_id,
+            orchestration_attempt_id=orchestration_attempt_id,
+            orchestration_chain_id=orchestration_chain_id,
+        )
 
         # Step 3c: Resolve allowed_tools from profile if not explicitly provided
         if allowed_tools is None and profile is not None:

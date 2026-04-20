@@ -543,8 +543,10 @@ class TestInitDb:
     """Tests for init_db function."""
 
     @patch("cli_agent_orchestrator.clients.database.Base")
-    def test_init_db(self, mock_base):
+    @patch("cli_agent_orchestrator.clients.database.run_schema_migrations")
+    def test_init_db(self, mock_run_schema_migrations, mock_base):
         """Test database initialization."""
         init_db()
 
         mock_base.metadata.create_all.assert_called_once()
+        mock_run_schema_migrations.assert_called_once()

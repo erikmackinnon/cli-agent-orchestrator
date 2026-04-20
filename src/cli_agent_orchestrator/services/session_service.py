@@ -47,6 +47,10 @@ def create_session(
     session_name: str | None = None,
     working_directory: str | None = None,
     allowed_tools: list[str] | None = None,
+    orchestration_run_id: str | None = None,
+    orchestration_job_id: str | None = None,
+    orchestration_attempt_id: str | None = None,
+    orchestration_chain_id: str | None = None,
     registry: PluginRegistry | None = None,
 ) -> Terminal:
     """Create a new session by creating its initial terminal."""
@@ -58,6 +62,10 @@ def create_session(
         new_session=True,
         working_directory=working_directory,
         allowed_tools=allowed_tools,
+        orchestration_run_id=orchestration_run_id,
+        orchestration_job_id=orchestration_job_id,
+        orchestration_attempt_id=orchestration_attempt_id,
+        orchestration_chain_id=orchestration_chain_id,
         registry=registry,
     )
     dispatch_plugin_event(

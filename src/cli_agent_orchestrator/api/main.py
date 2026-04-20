@@ -26,6 +26,7 @@ from cli_agent_orchestrator.clients.database import (
     get_terminal_metadata,
     init_db,
 )
+from cli_agent_orchestrator.clients.orchestration_store import OrchestrationStore
 from cli_agent_orchestrator.constants import (
     ALLOWED_HOSTS,
     CAO_HOME_DIR,
@@ -38,6 +39,20 @@ from cli_agent_orchestrator.constants import (
 )
 from cli_agent_orchestrator.models.flow import Flow
 from cli_agent_orchestrator.models.inbox import MessageStatus, OrchestrationType
+from cli_agent_orchestrator.models.orchestration import (
+    OrchestrationCancelRequest,
+    OrchestrationCancelResponse,
+    OrchestrationFinalizeRequest,
+    OrchestrationFinalizeResponse,
+    OrchestrationSpawnRequest,
+    OrchestrationSpawnResponse,
+    OrchestrationStartRequest,
+    OrchestrationStartResponse,
+    OrchestrationStatusRequest,
+    OrchestrationStatusResponse,
+    OrchestrationWaitRequest,
+    OrchestrationWaitResponse,
+)
 from cli_agent_orchestrator.models.terminal import Terminal, TerminalId
 from cli_agent_orchestrator.plugins import PluginRegistry
 from cli_agent_orchestrator.providers.manager import provider_manager
@@ -49,6 +64,8 @@ from cli_agent_orchestrator.services import (
 )
 from cli_agent_orchestrator.services.cleanup_service import cleanup_old_data
 from cli_agent_orchestrator.services.inbox_service import LogFileHandler
+from cli_agent_orchestrator.services.orchestration_runtime import OrchestrationRuntime
+from cli_agent_orchestrator.services.orchestration_service import OrchestrationService
 from cli_agent_orchestrator.services.terminal_service import OutputMode
 from cli_agent_orchestrator.utils.agent_profiles import resolve_provider
 from cli_agent_orchestrator.utils.logging import setup_logging
@@ -81,6 +98,21 @@ async def flow_daemon():
             logger.error(f"Flow daemon error: {e}")
 
         await asyncio.sleep(60)
+
+
+async def orchestration_reaper_daemon(
+    runtime: OrchestrationRuntime, interval_sec: int = 60
+) -> None:
+    """Periodic reaper pass for finalized/cancelled orchestration runs."""
+
+    logger.info("Orchestration reaper daemon started")
+    service = OrchestrationService(runtime=runtime)
+    while True:
+        try:
+            service.reap()
+        except Exception:
+            logger.warning("Orchestration reaper pass failed", exc_info=True)
+        await asyncio.sleep(interval_sec)
 
 
 # Response Models
@@ -131,16 +163,33 @@ async def lifespan(app: FastAPI):
     registry = PluginRegistry()
     await registry.load()
     app.state.plugin_registry = registry
+    orchestration_store = OrchestrationStore()
+    orchestration_runtime = OrchestrationRuntime(store=orchestration_store)
+    await orchestration_runtime.start()
+    app.state.orchestration_runtime = orchestration_runtime
+    orchestration_service = OrchestrationService(runtime=orchestration_runtime)
+    try:
+        orchestration_service.reconcile_startup()
+    except Exception:
+        logger.warning("Orchestration startup reconciliation failed", exc_info=True)
 
     # Run cleanup in background
     asyncio.create_task(asyncio.to_thread(cleanup_old_data))
 
     # Start flow daemon as background task
     daemon_task = asyncio.create_task(flow_daemon())
+    orchestration_reaper_task = asyncio.create_task(
+        orchestration_reaper_daemon(orchestration_runtime)
+    )
 
     # Start inbox watcher
     inbox_observer = PollingObserver(timeout=INBOX_POLLING_INTERVAL)
     inbox_observer.schedule(LogFileHandler(registry), str(TERMINAL_LOG_DIR), recursive=False)
+    inbox_observer.schedule(
+        orchestration_runtime.build_log_file_handler(),
+        str(TERMINAL_LOG_DIR),
+        recursive=False,
+    )
     inbox_observer.start()
     logger.info("Inbox watcher started (PollingObserver)")
 
@@ -158,6 +207,13 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
 
+    orchestration_reaper_task.cancel()
+    try:
+        await orchestration_reaper_task
+    except asyncio.CancelledError:
+        pass
+
+    await orchestration_runtime.stop()
     await registry.teardown()
     logger.info("Shutting down CLI Agent Orchestrator server...")
 
@@ -166,6 +222,29 @@ def get_plugin_registry(request: Request) -> PluginRegistry:
     """Return the plugin registry stored on the FastAPI application state."""
 
     return cast(PluginRegistry, request.app.state.plugin_registry)
+
+
+def get_orchestration_runtime(request: Request) -> OrchestrationRuntime:
+    """Return the orchestration runtime stored on the FastAPI application state."""
+
+    return cast(OrchestrationRuntime, request.app.state.orchestration_runtime)
+
+
+def get_orchestration_service(request: Request) -> OrchestrationService:
+    """Build an orchestration service bound to the server-owned runtime."""
+
+    return OrchestrationService(runtime=get_orchestration_runtime(request))
+
+
+def _orchestration_error_status(exc: ValueError) -> int:
+    """Map orchestration value errors to stable HTTP statuses."""
+
+    detail = str(exc).lower()
+    if "not found" in detail:
+        return status.HTTP_404_NOT_FOUND
+    if "cannot be finalized" in detail or "not accepting new jobs" in detail:
+        return status.HTTP_409_CONFLICT
+    return status.HTTP_400_BAD_REQUEST
 
 
 app = FastAPI(
@@ -306,6 +385,10 @@ async def create_session(
     session_name: Optional[str] = None,
     working_directory: Optional[str] = None,
     allowed_tools: Optional[str] = None,
+    orchestration_run_id: Optional[str] = None,
+    orchestration_job_id: Optional[str] = None,
+    orchestration_attempt_id: Optional[str] = None,
+    orchestration_chain_id: Optional[str] = None,
 ) -> Terminal:
     """Create a new session with exactly one terminal."""
     try:
@@ -318,6 +401,10 @@ async def create_session(
             session_name=session_name,
             working_directory=working_directory,
             allowed_tools=allowed_tools_list,
+            orchestration_run_id=orchestration_run_id,
+            orchestration_job_id=orchestration_job_id,
+            orchestration_attempt_id=orchestration_attempt_id,
+            orchestration_chain_id=orchestration_chain_id,
             registry=get_plugin_registry(request),
         )
         return result
@@ -381,6 +468,10 @@ async def create_terminal_in_session(
     agent_profile: str,
     working_directory: Optional[str] = None,
     allowed_tools: Optional[str] = None,
+    orchestration_run_id: Optional[str] = None,
+    orchestration_job_id: Optional[str] = None,
+    orchestration_attempt_id: Optional[str] = None,
+    orchestration_chain_id: Optional[str] = None,
 ) -> Terminal:
     """Create additional terminal in existing session."""
     try:
@@ -396,6 +487,10 @@ async def create_terminal_in_session(
             new_session=False,
             working_directory=working_directory,
             allowed_tools=allowed_tools_list,
+            orchestration_run_id=orchestration_run_id,
+            orchestration_job_id=orchestration_job_id,
+            orchestration_attempt_id=orchestration_attempt_id,
+            orchestration_chain_id=orchestration_chain_id,
             registry=get_plugin_registry(request),
         )
         return result
@@ -635,6 +730,106 @@ async def get_inbox_messages_endpoint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve inbox messages: {str(e)}",
+        )
+
+
+@app.post(
+    "/orchestration/start",
+    response_model=OrchestrationStartResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def orchestration_start(
+    request: Request, body: OrchestrationStartRequest
+) -> OrchestrationStartResponse:
+    """Start a new orchestration run and optionally enqueue initial jobs."""
+    try:
+        return get_orchestration_service(request).start(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=_orchestration_error_status(exc), detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to start orchestration run: {str(exc)}",
+        )
+
+
+@app.post("/orchestration/spawn", response_model=OrchestrationSpawnResponse)
+async def orchestration_spawn(
+    request: Request, body: OrchestrationSpawnRequest
+) -> OrchestrationSpawnResponse:
+    """Spawn one orchestration job under an existing run."""
+    try:
+        return get_orchestration_service(request).spawn(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=_orchestration_error_status(exc), detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to spawn orchestration job: {str(exc)}",
+        )
+
+
+@app.post("/orchestration/wait", response_model=OrchestrationWaitResponse)
+async def orchestration_wait(
+    request: Request, body: OrchestrationWaitRequest
+) -> OrchestrationWaitResponse:
+    """Bounded long-poll wait for orchestration events."""
+    try:
+        return await get_orchestration_service(request).wait(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=_orchestration_error_status(exc), detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to wait for orchestration events: {str(exc)}",
+        )
+
+
+@app.post("/orchestration/status", response_model=OrchestrationStatusResponse)
+async def orchestration_status(
+    request: Request, body: OrchestrationStatusRequest
+) -> OrchestrationStatusResponse:
+    """Return non-blocking orchestration run/job/attempt/event status."""
+    try:
+        return get_orchestration_service(request).status(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=_orchestration_error_status(exc), detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get orchestration status: {str(exc)}",
+        )
+
+
+@app.post("/orchestration/cancel", response_model=OrchestrationCancelResponse)
+async def orchestration_cancel(
+    request: Request, body: OrchestrationCancelRequest
+) -> OrchestrationCancelResponse:
+    """Cancel orchestration work at run/job scope."""
+    try:
+        return get_orchestration_service(request).cancel(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=_orchestration_error_status(exc), detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to cancel orchestration run: {str(exc)}",
+        )
+
+
+@app.post("/orchestration/finalize", response_model=OrchestrationFinalizeResponse)
+async def orchestration_finalize(
+    request: Request, body: OrchestrationFinalizeRequest
+) -> OrchestrationFinalizeResponse:
+    """Finalize an orchestration run with explicit outcome and cleanup policy."""
+    try:
+        return get_orchestration_service(request).finalize(body)
+    except ValueError as exc:
+        raise HTTPException(status_code=_orchestration_error_status(exc), detail=str(exc))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to finalize orchestration run: {str(exc)}",
         )
 
 

@@ -240,6 +240,38 @@ Send a message to another terminal's inbox.
 
 ---
 
+## Orchestration Event Bus
+
+The orchestration API provides a durable run/job/attempt event model independent of inbox delivery.
+
+### POST /orchestration/start
+Create a run and optionally enqueue initial jobs.
+
+### POST /orchestration/spawn
+Queue one job under an existing run.
+
+### POST /orchestration/wait
+Bounded blocking wait over append-only events.
+
+Recommended usage:
+- call repeatedly with the returned `cursor`
+- keep `wait_timeout_sec` bounded (for example, `45`)
+
+### POST /orchestration/status
+Get run snapshot plus optional jobs/attempts/events.
+
+### POST /orchestration/cancel
+Cancel by scope:
+- `run`
+- `job` (requires `job_id`)
+
+### POST /orchestration/finalize
+Explicitly finalize a run with outcome and cleanup policy.
+
+For complete usage and cleanup/recovery semantics, see [Orchestration Event Bus](./orchestration-event-bus.md).
+
+---
+
 ## Error Responses
 
 All endpoints return standard HTTP status codes:

@@ -92,7 +92,9 @@ If the agent profile includes `mcpServers`, CAO injects each MCP server into Cod
 
 For example, the `code_supervisor` profile includes the `cao-mcp-server` which provides `handoff` and `send_message` tools. This allows the supervisor agent to delegate work to Developer and Reviewer agents through CAO's multi-agent orchestration.
 
-CAO also sets `tool_timeout_sec=600.0` (10 minutes) for each MCP server to allow long-running operations like handoff. **Important**: The value must be a TOML float (`600.0`, not `600`) because Codex deserializes this field via `Option<f64>`. A TOML integer is silently rejected, falling back to the 60-second default.
+CAO also sets `tool_timeout_sec=600.0` (10 minutes) for each MCP server to allow long-running operations like handoff. **Important**: the value must be a TOML float (`600.0`, not `600`) because Codex deserializes this field via `Option<f64>`. A TOML integer is silently rejected, falling back to the 60-second default.
+
+For orchestration event-bus workflows that rely on repeated `orchestration_wait` calls, prefer raising this to `3600.0` in your Codex config and keep each wait bounded (`wait_timeout_sec` around `45`) instead of using one long indefinite wait.
 
 ### Launch Flags
 
