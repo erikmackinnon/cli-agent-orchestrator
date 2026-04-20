@@ -1,5 +1,7 @@
 """Tests for orchestration callback marker protocol and ingestion."""
 
+import base64
+import json
 from pathlib import Path
 
 import pytest
@@ -38,6 +40,12 @@ def _wrap_marker_like_ansi_terminal_output(marker: str) -> str:
         suffix = "⟧" if index == len(segments) - 1 else ""
         lines.append(f"\x1b[39;49m\x1b[K  {prefix}{segment}{suffix}\x1b[39m\x1b[49m\x1b[0m")
     return "\n".join(lines)
+
+
+def _encode_raw_marker(payload: dict[str, object]) -> str:
+    payload_json = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    encoded = base64.urlsafe_b64encode(payload_json.encode("utf-8")).decode("ascii").rstrip("=")
+    return f"⟦CAO-EVENT-v1:{encoded}⟧"
 
 
 @pytest.fixture
@@ -89,6 +97,47 @@ def test_marker_round_trip_parse() -> None:
     assert parsed.status == "succeeded"
     assert parsed.result == {"summary": "done"}
     assert parsed.nonce == "evt-1"
+
+
+@pytest.mark.parametrize("raw_version", [1, "1", "v1"])
+def test_parse_marker_accepts_live_version_shapes(raw_version: object) -> None:
+    marker = _encode_raw_marker(
+        {
+            "version": raw_version,
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "attempt_id": "attempt-1",
+            "type": "job.completed",
+            "status": "succeeded",
+            "result": {"summary": "done"},
+            "nonce": "evt-live",
+        }
+    )
+
+    parsed = parse_worker_callback_marker(marker)
+
+    assert parsed.version == 1
+    assert parsed.run_id == "run-1"
+    assert parsed.nonce == "evt-live"
+
+
+@pytest.mark.parametrize("raw_version", [2, "2", "v2", "one", None, True])
+def test_parse_marker_rejects_unsupported_version_shapes(raw_version: object) -> None:
+    marker = _encode_raw_marker(
+        {
+            "version": raw_version,
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "attempt_id": "attempt-1",
+            "type": "job.completed",
+            "status": "succeeded",
+            "result": {"summary": "done"},
+            "nonce": "evt-bad-version",
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_marker_payload_shape"):
+        parse_worker_callback_marker(marker)
 
 
 def test_extract_markers_reports_malformed_framing() -> None:
@@ -169,11 +218,7 @@ def test_extract_rejects_marker_with_injected_payload_whitespace(
         }
     )
     payload = marker[len("⟦CAO-EVENT-v1:") : -1]
-    malformed = (
-        f"⟦CAO-EVENT-v1:{payload[:16]}"
-        f"{injected_whitespace}"
-        f"{payload[16:]}⟧"
-    )
+    malformed = f"⟦CAO-EVENT-v1:{payload[:16]}" f"{injected_whitespace}" f"{payload[16:]}⟧"
 
     parsed, failures = extract_worker_callback_markers(f"prefix {malformed} suffix")
 
@@ -249,6 +294,7 @@ def test_prompt_injection_helper_contains_stable_ids() -> None:
     assert "Your attempt_id is attempt-1." in message
     assert "Your chain_id is chain-1." in message
     assert "⟦CAO-EVENT-v1:<base64url-json>⟧" in message
+    assert 'Set version to integer 1 (not string "1" and not string "v1").' in message
 
 
 def test_ingestion_persists_lifecycle_events(seeded_store: OrchestrationStore) -> None:

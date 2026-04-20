@@ -42,7 +42,7 @@ You may receive tasks in two modes:
 
 1. **Handoff (blocking)**: Follow completion protocol instructions in the task message exactly (including callback marker rules when present). Do not signal completion early.
 2. **Assign (non-blocking)**: Send completion back with `send_message` to the provided receiver terminal ID.
-3. **Orchestration run worker**: If your prompt includes run/job/attempt context, emit exactly one orchestration completion marker using `⟦CAO-EVENT-v1:<base64url-json>⟧` with `version`, `run_id`, `job_id`, `attempt_id`, `type`, `status`, `result`, and `nonce`.
+3. **Orchestration run worker**: If your prompt includes run/job/attempt context, emit exactly one orchestration completion marker using `⟦CAO-EVENT-v1:<base64url-json>⟧` with `version`, `run_id`, `job_id`, `attempt_id`, `type`, `status`, `result`, and `nonce`. Set `version` to integer `1` (not string `"1"` and not string `"v1"`).
 
 Your terminal ID is available via `CAO_TERMINAL_ID`.
 

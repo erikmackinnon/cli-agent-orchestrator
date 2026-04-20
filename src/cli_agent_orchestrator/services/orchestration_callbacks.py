@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Literal, Optional, Tuple
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from cli_agent_orchestrator.clients.orchestration_store import OrchestrationStore
 from cli_agent_orchestrator.models.orchestration import (
@@ -28,6 +28,8 @@ MARKER_PREFIX = "⟦CAO-EVENT-v1:"
 MARKER_SUFFIX = "⟧"
 MARKER_PATTERN = re.compile(r"⟦[^⟧]+⟧")
 EXACT_MARKER_PATTERN = re.compile(r"^⟦CAO-EVENT-v1:(?P<encoded>[A-Za-z0-9_-]+)⟧$")
+CANONICAL_MARKER_VERSION = 1
+LEGACY_MARKER_VERSION_STRINGS = {"1", "v1"}
 # Strip common ANSI/VT100 escape sequences that may appear in tmux log captures.
 ANSI_ESCAPE_PATTERN = re.compile(
     r"\x1B(?:"
@@ -48,6 +50,7 @@ When finished, emit exactly one CAO completion marker using this format:
 {marker_format}
 
 The marker JSON payload must include: version, run_id, job_id, attempt_id, type, status, result, nonce.
+Set version to integer 1 (not string "1" and not string "v1").
 Do not emit the completion marker until the work is actually done.
 If blocked or unable to complete, emit a failure marker with failure_type and explanation in result.
 """
@@ -66,6 +69,17 @@ class WorkerCallbackMarker(BaseModel):
     status: str = Field(min_length=1)
     result: Optional[Any] = None
     nonce: str = Field(min_length=1)
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def _normalize_marker_version(cls, value: Any) -> int:
+        if isinstance(value, bool):
+            raise ValueError("unsupported_marker_version")
+        if isinstance(value, int) and value == CANONICAL_MARKER_VERSION:
+            return CANONICAL_MARKER_VERSION
+        if isinstance(value, str) and value.strip().lower() in LEGACY_MARKER_VERSION_STRINGS:
+            return CANONICAL_MARKER_VERSION
+        raise ValueError("unsupported_marker_version")
 
 
 @dataclass(frozen=True)

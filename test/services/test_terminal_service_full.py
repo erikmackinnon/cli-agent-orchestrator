@@ -243,6 +243,7 @@ class TestCreateTerminal:
         assert "Your attempt_id is attempt-1." in skill_prompt
         assert "Your chain_id is chain-1." in skill_prompt
         assert "⟦CAO-EVENT-v1:<base64url-json>⟧" in skill_prompt
+        assert 'Set version to integer 1 (not string "1" and not string "v1").' in skill_prompt
 
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")
@@ -299,6 +300,7 @@ class TestCreateTerminal:
         assert "Your attempt_id is attempt-1." in skill_prompt
         assert "Your chain_id is none." in skill_prompt
         assert "⟦CAO-EVENT-v1:<base64url-json>⟧" in skill_prompt
+        assert 'Set version to integer 1 (not string "1" and not string "v1").' in skill_prompt
 
     @patch("cli_agent_orchestrator.services.terminal_service.TERMINAL_LOG_DIR")
     @patch("cli_agent_orchestrator.services.terminal_service.provider_manager")

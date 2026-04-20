@@ -10,6 +10,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-20**: Restored orchestration callback compatibility for live worker marker versions and tightened emission guidance:
+  - callback payload parsing now accepts `version` as `1`, `"1"`, or `"v1"` and normalizes to canonical integer `1`, while orchestration worker instructions (runtime callback helper + built-in developer/reviewer/codex_debugger profiles) now explicitly require emitting integer `1` for deterministic event ingestion
 - **2026-04-20**: Fixed orchestration callback ingestion for terminal-wrapped completion markers:
   - callback extraction now canonicalizes wrapped `⟦CAO-EVENT-v1:<base64url-json>⟧` markers by stripping in-marker whitespace before strict framing/base64/json validation, so wrapped worker completions are ingested into durable lifecycle events instead of leaving runs stuck `running`
 - **2026-04-20**: Hardened orchestration callback recovery for exited workers:
