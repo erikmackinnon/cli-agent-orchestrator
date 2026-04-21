@@ -10,6 +10,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-21**: Fixed callback cursor pinning on benign split-marker tails:
+  - runtime pending-fragment detection now only rewinds when post-seed bytes still plausibly continue a real marker (`v1:` with optional ANSI/whitespace), preventing indefinite rereads of benign `⟦CAO-EVENT-...` text while preserving split-marker ingestion across appends and restarts
 - **2026-04-21**: Replaced fixed-overlap callback ingestion with pending-fragment cursoring and append-only wakeups:
   - runtime log ingestion now persists offsets only through fully closed `⟦CAO-EVENT-...⟧` markers (so large multi-append markers survive chunking and restarts), and run waiters are notified only when new durable events are appended (duplicate-only rereads no longer advance in-process cursors)
 - **2026-04-21**: Fixed split-marker callback ingestion during incremental worker-log updates:

@@ -50,7 +50,9 @@ class OrchestrationRuntime:
         self._run_signals: Dict[str, _RunSignal] = {}
         self._log_offsets: Dict[str, int] = {}
         self._offset_lock = threading.Lock()
-        self._marker_start_seed = MARKER_PREFIX.rsplit("v1:", 1)[0].encode("utf-8")
+        marker_start_seed = MARKER_PREFIX.rsplit("v1:", 1)[0]
+        self._marker_start_seed = marker_start_seed.encode("utf-8")
+        self._marker_version_prefix = MARKER_PREFIX[len(marker_start_seed) :].encode("utf-8")
         self._marker_suffix = MARKER_SUFFIX.encode("utf-8")
 
     @property
@@ -211,13 +213,68 @@ class OrchestrationRuntime:
                 self._marker_suffix,
                 last_seed + len(self._marker_start_seed),
             )
-            if suffix_after_seed == -1:
+            if suffix_after_seed == -1 and self._looks_like_marker_seed_continuation(
+                chunk[last_seed + len(self._marker_start_seed) :]
+            ):
                 return last_seed
 
         partial_seed_size = self._trailing_marker_seed_overlap(chunk)
         if partial_seed_size > 0:
             return len(chunk) - partial_seed_size
         return None
+
+    def _looks_like_marker_seed_continuation(self, tail_after_seed: bytes) -> bool:
+        normalized_tail = self._skip_marker_leading_artifacts(tail_after_seed)
+        if not normalized_tail:
+            return True
+        return self._marker_version_prefix.startswith(
+            normalized_tail
+        ) or normalized_tail.startswith(self._marker_version_prefix)
+
+    def _skip_marker_leading_artifacts(self, data: bytes) -> bytes:
+        index = 0
+        while index < len(data):
+            byte = data[index]
+            if byte in b" \t\r\n":
+                index += 1
+                continue
+
+            if byte == 0x1B:
+                consumed = self._consume_ansi_escape(data=data, index=index)
+                if consumed > index:
+                    index = consumed
+                    continue
+            break
+        return data[index:]
+
+    def _consume_ansi_escape(self, *, data: bytes, index: int) -> int:
+        if index + 1 >= len(data):
+            return len(data)
+
+        esc_type = data[index + 1]
+        if esc_type == 0x5B:
+            cursor = index + 2
+            while cursor < len(data):
+                if 0x40 <= data[cursor] <= 0x7E:
+                    return cursor + 1
+                cursor += 1
+            return len(data)
+
+        if esc_type == 0x5D:
+            cursor = index + 2
+            while cursor < len(data):
+                byte = data[cursor]
+                if byte == 0x07:
+                    return cursor + 1
+                if byte == 0x1B and cursor + 1 < len(data) and data[cursor + 1] == 0x5C:
+                    return cursor + 2
+                cursor += 1
+            return len(data)
+
+        if 0x40 <= esc_type <= 0x5F:
+            return index + 2
+
+        return len(data)
 
     def _trailing_marker_seed_overlap(self, chunk: bytes) -> int:
         max_overlap = min(len(self._marker_start_seed) - 1, len(chunk))
