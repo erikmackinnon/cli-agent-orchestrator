@@ -110,6 +110,7 @@ class CallbackIngestionResult:
     parse_failures: List[MarkerParseFailure] = field(default_factory=list)
     ingestion_failures: List[MarkerParseFailure] = field(default_factory=list)
     affected_run_ids: List[str] = field(default_factory=list)
+    run_ids_with_new_events: List[str] = field(default_factory=list)
 
 
 def _base64url_decode(data: str) -> bytes:
@@ -340,6 +341,11 @@ class OrchestrationCallbackIngestor:
             result.duplicates += duplicate_events
             if parsed_marker.marker.run_id not in result.affected_run_ids:
                 result.affected_run_ids.append(parsed_marker.marker.run_id)
+            if (
+                appended_events > 0
+                and parsed_marker.marker.run_id not in result.run_ids_with_new_events
+            ):
+                result.run_ids_with_new_events.append(parsed_marker.marker.run_id)
 
         return result
 

@@ -957,7 +957,7 @@ class OrchestrationService:
                     terminal_id=terminal_id,
                     output=log_text,
                 )
-                for run_id in result.affected_run_ids:
+                for run_id in result.run_ids_with_new_events:
                     self._runtime.notify_run_update(run_id=run_id)
             else:
                 result = self._runtime.ingest_log_update(terminal_id=terminal_id, log_path=log_path)

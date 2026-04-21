@@ -13,6 +13,8 @@ from watchdog.events import DirModifiedEvent, FileModifiedEvent, FileSystemEvent
 
 from cli_agent_orchestrator.clients.orchestration_store import OrchestrationStore
 from cli_agent_orchestrator.services.orchestration_callbacks import (
+    MARKER_PREFIX,
+    MARKER_SUFFIX,
     CallbackIngestionResult,
     OrchestrationCallbackIngestor,
 )
@@ -48,6 +50,8 @@ class OrchestrationRuntime:
         self._run_signals: Dict[str, _RunSignal] = {}
         self._log_offsets: Dict[str, int] = {}
         self._offset_lock = threading.Lock()
+        self._marker_start_seed = MARKER_PREFIX.rsplit("v1:", 1)[0].encode("utf-8")
+        self._marker_suffix = MARKER_SUFFIX.encode("utf-8")
 
     @property
     def store(self) -> OrchestrationStore:
@@ -137,14 +141,23 @@ class OrchestrationRuntime:
     def ingest_log_update(self, *, terminal_id: str, log_path: Path) -> CallbackIngestionResult:
         """Ingest callback markers from newly appended terminal log text."""
 
-        new_text = self._read_new_log_text(terminal_id=terminal_id, log_path=log_path)
-        if not new_text:
+        chunk = self._read_new_log_chunk(terminal_id=terminal_id, log_path=log_path)
+        if chunk is None:
             return CallbackIngestionResult()
 
-        result = self._callback_ingestor.ingest_terminal_output(
-            terminal_id=terminal_id, output=new_text
+        read_offset, file_size, new_bytes = chunk
+        output = new_bytes.decode("utf-8", errors="ignore")
+        result = (
+            self._callback_ingestor.ingest_terminal_output(terminal_id=terminal_id, output=output)
+            if output
+            else CallbackIngestionResult()
         )
-        for run_id in result.affected_run_ids:
+
+        pending_start = self._find_pending_marker_start(new_bytes)
+        next_offset = file_size if pending_start is None else read_offset + pending_start
+        self._persist_log_offset(terminal_id=terminal_id, byte_offset=next_offset)
+
+        for run_id in result.run_ids_with_new_events:
             self.notify_run_update(run_id=run_id)
         return result
 
@@ -161,11 +174,13 @@ class OrchestrationRuntime:
         self._run_signals[run_id] = signal
         return signal
 
-    def _read_new_log_text(self, *, terminal_id: str, log_path: Path) -> str:
+    def _read_new_log_chunk(
+        self, *, terminal_id: str, log_path: Path
+    ) -> Optional[tuple[int, int, bytes]]:
         try:
             file_size = log_path.stat().st_size
         except FileNotFoundError:
-            return ""
+            return None
 
         previous_offset = self._get_known_log_offset(terminal_id=terminal_id)
         if previous_offset is None:
@@ -178,21 +193,38 @@ class OrchestrationRuntime:
         if file_size == read_offset:
             if previous_offset != file_size:
                 self._persist_log_offset(terminal_id=terminal_id, byte_offset=file_size)
-            return ""
+            return None
 
-        overlap_start = read_offset
-        if overlap_start > 0 and self._log_read_overlap_bytes > 0:
-            # Re-read a bounded window so markers split across append writes
-            # can be reconstructed without scanning full logs.
-            overlap_start = max(0, overlap_start - self._log_read_overlap_bytes)
+        with log_path.open("rb") as handle:
+            handle.seek(read_offset)
+            data = handle.read()
 
-        with log_path.open("r", encoding="utf-8", errors="ignore") as handle:
-            handle.seek(overlap_start)
-            text = handle.read()
+        return read_offset, file_size, data
 
-        self._persist_log_offset(terminal_id=terminal_id, byte_offset=file_size)
+    def _find_pending_marker_start(self, chunk: bytes) -> Optional[int]:
+        if not chunk:
+            return None
 
-        return text
+        last_seed = chunk.rfind(self._marker_start_seed)
+        if last_seed != -1:
+            suffix_after_seed = chunk.find(
+                self._marker_suffix,
+                last_seed + len(self._marker_start_seed),
+            )
+            if suffix_after_seed == -1:
+                return last_seed
+
+        partial_seed_size = self._trailing_marker_seed_overlap(chunk)
+        if partial_seed_size > 0:
+            return len(chunk) - partial_seed_size
+        return None
+
+    def _trailing_marker_seed_overlap(self, chunk: bytes) -> int:
+        max_overlap = min(len(self._marker_start_seed) - 1, len(chunk))
+        for overlap in range(max_overlap, 0, -1):
+            if chunk[-overlap:] == self._marker_start_seed[:overlap]:
+                return overlap
+        return 0
 
     def _get_known_log_offset(self, *, terminal_id: str) -> Optional[int]:
         with self._offset_lock:

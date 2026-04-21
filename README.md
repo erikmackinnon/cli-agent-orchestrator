@@ -10,6 +10,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-21**: Replaced fixed-overlap callback ingestion with pending-fragment cursoring and append-only wakeups:
+  - runtime log ingestion now persists offsets only through fully closed `⟦CAO-EVENT-...⟧` markers (so large multi-append markers survive chunking and restarts), and run waiters are notified only when new durable events are appended (duplicate-only rereads no longer advance in-process cursors)
 - **2026-04-21**: Fixed split-marker callback ingestion during incremental worker-log updates:
   - runtime incremental log reads now include a bounded overlap window before the persisted byte offset, so callback markers split across file-modification chunks (and across runtime restarts) are eventually reconstructed and ingested without full-log rescans, while event dedupe continues preventing duplicate lifecycle events
 - **2026-04-20**: Fixed orchestration maintenance cleanup so successful worker terminals no longer accumulate:

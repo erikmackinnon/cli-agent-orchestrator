@@ -321,6 +321,7 @@ def test_ingestion_persists_lifecycle_events(seeded_store: OrchestrationStore) -
     assert result.parse_failures == []
     assert result.ingestion_failures == []
     assert result.affected_run_ids == ["run-1"]
+    assert result.run_ids_with_new_events == ["run-1"]
 
     attempt = seeded_store.get_attempt(attempt_id="attempt-1")
     assert attempt is not None
@@ -442,8 +443,10 @@ def test_ingestion_dedupes_repeated_markers(seeded_store: OrchestrationStore) ->
 
     assert first.events_appended == 2
     assert first.duplicates == 0
+    assert first.run_ids_with_new_events == ["run-1"]
     assert second.events_appended == 0
     assert second.duplicates == 2
+    assert second.run_ids_with_new_events == []
 
     events = seeded_store.read_events(run_id="run-1", cursor=0)
     assert len(events) == 2

@@ -164,10 +164,10 @@ async def test_runtime_uses_persisted_offsets_across_restart(
     await restarted_runtime.start()
     second_result = restarted_runtime.ingest_log_update(terminal_id="term-1", log_path=log_path)
 
-    assert second_result.markers_seen == 2
-    assert second_result.markers_ingested == 2
+    assert second_result.markers_seen == 1
+    assert second_result.markers_ingested == 1
     assert second_result.events_appended == 2
-    assert second_result.duplicates == 2
+    assert second_result.duplicates == 0
     assert second_result.ingestion_failures == []
     assert second_result.parse_failures == []
 
@@ -236,7 +236,71 @@ async def test_runtime_ingests_marker_split_across_incremental_updates(
 
 
 @pytest.mark.asyncio
-async def test_runtime_overlap_re_read_does_not_duplicate_events(
+async def test_runtime_ingests_large_marker_split_across_multiple_updates(
+    store: OrchestrationStore, tmp_path: Path
+) -> None:
+    _seed_running_attempt(store)
+    runtime = OrchestrationRuntime(store=store, log_read_overlap_bytes=8 * 1024)
+    await runtime.start()
+
+    marker = encode_worker_callback_marker(
+        {
+            "version": 1,
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "attempt_id": "attempt-1",
+            "type": "job.completed",
+            "status": "succeeded",
+            "result": {"summary": "x" * (24 * 1024)},
+            "nonce": "evt-runtime-large-split",
+        }
+    )
+    assert len(marker) > 20 * 1024
+
+    first_chunk_end = 7 * 1024
+    second_chunk_end = 14 * 1024
+    first_chunk = marker[:first_chunk_end]
+    second_chunk = marker[first_chunk_end:second_chunk_end]
+    third_chunk = marker[second_chunk_end:]
+
+    log_path = tmp_path / "term-1.log"
+    log_path.write_text(first_chunk, encoding="utf-8")
+    first_result = runtime.ingest_log_update(terminal_id="term-1", log_path=log_path)
+    assert first_result.markers_seen == 0
+    assert first_result.markers_ingested == 0
+    assert first_result.events_appended == 0
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(second_chunk)
+    second_result = runtime.ingest_log_update(terminal_id="term-1", log_path=log_path)
+    assert second_result.markers_seen == 0
+    assert second_result.markers_ingested == 0
+    assert second_result.events_appended == 0
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(third_chunk)
+    third_result = runtime.ingest_log_update(terminal_id="term-1", log_path=log_path)
+    assert third_result.markers_seen == 1
+    assert third_result.markers_ingested == 1
+    assert third_result.events_appended == 2
+    assert third_result.duplicates == 0
+
+    attempt = store.get_attempt(attempt_id="attempt-1")
+    assert attempt is not None
+    assert attempt.status == AttemptStatus.SUCCEEDED.value
+
+    job = store.get_job(job_id="job-1")
+    assert job is not None
+    assert job.status == JobStatus.SUCCEEDED.value
+
+    events = store.read_events(run_id="run-1", cursor=0)
+    assert len(events) == 2
+
+    await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_incremental_reads_do_not_reingest_previous_marker(
     store: OrchestrationStore, tmp_path: Path
 ) -> None:
     _seed_running_attempt(store)
@@ -279,10 +343,10 @@ async def test_runtime_overlap_re_read_does_not_duplicate_events(
         handle.write(f"{marker_completed}\n")
 
     second_result = runtime.ingest_log_update(terminal_id="term-1", log_path=log_path)
-    assert second_result.markers_seen == 2
-    assert second_result.markers_ingested == 2
+    assert second_result.markers_seen == 1
+    assert second_result.markers_ingested == 1
     assert second_result.events_appended == 2
-    assert second_result.duplicates == 2
+    assert second_result.duplicates == 0
 
     events = store.read_events(run_id="run-1", cursor=0)
     assert len(events) == 4
@@ -334,3 +398,103 @@ async def test_runtime_ingests_split_ansi_wrapped_marker(
     assert len(events) == 2
 
     await runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_preserves_pending_marker_fragment_across_restart(
+    store: OrchestrationStore, tmp_path: Path
+) -> None:
+    _seed_running_attempt(store)
+
+    marker = encode_worker_callback_marker(
+        {
+            "version": 1,
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "attempt_id": "attempt-1",
+            "type": "job.completed",
+            "status": "succeeded",
+            "result": {"summary": "done after restart"},
+            "nonce": "evt-runtime-restart-split",
+        }
+    )
+    split_index = len(marker) // 2
+    first_chunk = marker[:split_index]
+    second_chunk = marker[split_index:]
+
+    log_path = tmp_path / "term-1.log"
+    log_path.write_text(first_chunk, encoding="utf-8")
+
+    runtime = OrchestrationRuntime(store=store, log_read_overlap_bytes=8 * 1024)
+    await runtime.start()
+    first_result = runtime.ingest_log_update(terminal_id="term-1", log_path=log_path)
+    assert first_result.markers_seen == 0
+    assert first_result.markers_ingested == 0
+    assert first_result.events_appended == 0
+    assert store.get_terminal_log_offset(terminal_id="term-1") == 0
+    await runtime.stop()
+
+    with log_path.open("a", encoding="utf-8") as handle:
+        handle.write(second_chunk)
+
+    restarted_runtime = OrchestrationRuntime(store=store, log_read_overlap_bytes=8 * 1024)
+    await restarted_runtime.start()
+    second_result = restarted_runtime.ingest_log_update(terminal_id="term-1", log_path=log_path)
+    assert second_result.markers_seen == 1
+    assert second_result.markers_ingested == 1
+    assert second_result.events_appended == 2
+    assert second_result.duplicates == 0
+
+    events = store.read_events(run_id="run-1", cursor=0)
+    assert len(events) == 2
+
+    await restarted_runtime.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_duplicate_only_reread_does_not_notify_run_waiters(
+    store: OrchestrationStore, tmp_path: Path
+) -> None:
+    _seed_running_attempt(store)
+    marker = encode_worker_callback_marker(
+        {
+            "version": 1,
+            "run_id": "run-1",
+            "job_id": "job-1",
+            "attempt_id": "attempt-1",
+            "type": "job.completed",
+            "status": "succeeded",
+            "result": {"summary": "done"},
+            "nonce": "evt-runtime-duplicate-only",
+        }
+    )
+    log_path = tmp_path / "term-1.log"
+    log_path.write_text(f"{marker}\n", encoding="utf-8")
+
+    initial_runtime = OrchestrationRuntime(store=store, log_read_overlap_bytes=8 * 1024)
+    await initial_runtime.start()
+    first_result = initial_runtime.ingest_log_update(terminal_id="term-1", log_path=log_path)
+    assert first_result.events_appended == 2
+    await initial_runtime.stop()
+
+    # Force a duplicate-only ingest path by rewinding the persisted cursor.
+    store.upsert_terminal_log_offset(terminal_id="term-1", byte_offset=0)
+
+    reread_runtime = OrchestrationRuntime(store=store, log_read_overlap_bytes=8 * 1024)
+    await reread_runtime.start()
+    baseline_cursor = reread_runtime.current_signal_cursor(run_id="run-1")
+    second_result = reread_runtime.ingest_log_update(terminal_id="term-1", log_path=log_path)
+
+    assert second_result.markers_seen == 1
+    assert second_result.markers_ingested == 1
+    assert second_result.events_appended == 0
+    assert second_result.duplicates == 2
+
+    updated_cursor = await reread_runtime.wait_for_run_update(
+        run_id="run-1",
+        cursor=baseline_cursor,
+        timeout_sec=1,
+    )
+    assert updated_cursor == baseline_cursor
+
+    await reread_runtime.stop()
