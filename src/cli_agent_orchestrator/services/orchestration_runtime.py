@@ -214,7 +214,8 @@ class OrchestrationRuntime:
                 last_seed + len(self._marker_start_seed),
             )
             if suffix_after_seed == -1 and self._looks_like_marker_seed_continuation(
-                chunk[last_seed + len(self._marker_start_seed) :]
+                chunk_before_seed=chunk[:last_seed],
+                tail_after_seed=chunk[last_seed + len(self._marker_start_seed) :],
             ):
                 return last_seed
 
@@ -223,10 +224,12 @@ class OrchestrationRuntime:
             return len(chunk) - partial_seed_size
         return None
 
-    def _looks_like_marker_seed_continuation(self, tail_after_seed: bytes) -> bool:
+    def _looks_like_marker_seed_continuation(
+        self, *, chunk_before_seed: bytes, tail_after_seed: bytes
+    ) -> bool:
         normalized_tail = self._skip_marker_leading_artifacts(tail_after_seed)
         if not normalized_tail:
-            return True
+            return not chunk_before_seed
         return self._marker_version_prefix.startswith(
             normalized_tail
         ) or normalized_tail.startswith(self._marker_version_prefix)

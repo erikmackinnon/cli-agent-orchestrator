@@ -10,6 +10,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-20**: Fixed seed-only callback-tail restart reread edge case:
+  - runtime now advances past benign chunks that only end with a bare `⟦CAO-EVENT-` tail after prior log text (preventing persistent restart rereads), while still preserving true seed-split marker chunks for multi-append ingestion
 - **2026-04-21**: Fixed callback cursor pinning on benign split-marker tails:
   - runtime pending-fragment detection now only rewinds when post-seed bytes still plausibly continue a real marker (`v1:` with optional ANSI/whitespace), preventing indefinite rereads of benign `⟦CAO-EVENT-...` text while preserving split-marker ingestion across appends and restarts
 - **2026-04-21**: Replaced fixed-overlap callback ingestion with pending-fragment cursoring and append-only wakeups:
