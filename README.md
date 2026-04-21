@@ -10,6 +10,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-21**: Fixed split-marker callback ingestion during incremental worker-log updates:
+  - runtime incremental log reads now include a bounded overlap window before the persisted byte offset, so callback markers split across file-modification chunks (and across runtime restarts) are eventually reconstructed and ingested without full-log rescans, while event dedupe continues preventing duplicate lifecycle events
 - **2026-04-20**: Fixed orchestration maintenance cleanup so successful worker terminals no longer accumulate:
   - active-run maintenance now auto-terminates `succeeded` worker terminals before releasing their worker links, while preserving non-success terminal attempts for existing debug workflows and keeping repeated maintenance passes idempotent
 - **2026-04-20**: Added orchestration status liveness references for safer supervisor decisions during quiet event windows:

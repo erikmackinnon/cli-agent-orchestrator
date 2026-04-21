@@ -31,14 +31,18 @@ class _RunSignal:
 class OrchestrationRuntime:
     """Server-owned orchestration runtime state and callback ingestion."""
 
+    DEFAULT_LOG_READ_OVERLAP_BYTES = 8 * 1024
+
     def __init__(
         self,
         *,
         store: OrchestrationStore,
         callback_ingestor: Optional[OrchestrationCallbackIngestor] = None,
+        log_read_overlap_bytes: int = DEFAULT_LOG_READ_OVERLAP_BYTES,
     ):
         self._store = store
         self._callback_ingestor = callback_ingestor or OrchestrationCallbackIngestor(store=store)
+        self._log_read_overlap_bytes = max(0, int(log_read_overlap_bytes))
         self._running = False
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._run_signals: Dict[str, _RunSignal] = {}
@@ -176,8 +180,14 @@ class OrchestrationRuntime:
                 self._persist_log_offset(terminal_id=terminal_id, byte_offset=file_size)
             return ""
 
+        overlap_start = read_offset
+        if overlap_start > 0 and self._log_read_overlap_bytes > 0:
+            # Re-read a bounded window so markers split across append writes
+            # can be reconstructed without scanning full logs.
+            overlap_start = max(0, overlap_start - self._log_read_overlap_bytes)
+
         with log_path.open("r", encoding="utf-8", errors="ignore") as handle:
-            handle.seek(read_offset)
+            handle.seek(overlap_start)
             text = handle.read()
 
         self._persist_log_offset(terminal_id=terminal_id, byte_offset=file_size)
