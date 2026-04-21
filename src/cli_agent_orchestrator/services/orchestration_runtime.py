@@ -191,6 +191,8 @@ class OrchestrationRuntime:
         read_offset = previous_offset
         if file_size < previous_offset:
             read_offset = 0
+        elif file_size > previous_offset:
+            read_offset = self._adjust_read_offset_for_boundary_overlap(previous_offset)
 
         if file_size == read_offset:
             if previous_offset != file_size:
@@ -202,6 +204,16 @@ class OrchestrationRuntime:
             data = handle.read()
 
         return read_offset, file_size, data
+
+    def _adjust_read_offset_for_boundary_overlap(self, previous_offset: int) -> int:
+        if previous_offset <= 0:
+            return 0
+
+        overlap_size = min(self._log_read_overlap_bytes, len(self._marker_start_seed))
+        if overlap_size <= 0:
+            return previous_offset
+
+        return max(0, previous_offset - overlap_size)
 
     def _find_pending_marker_start(self, chunk: bytes) -> Optional[int]:
         if not chunk:

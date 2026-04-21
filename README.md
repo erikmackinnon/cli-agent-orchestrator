@@ -10,6 +10,8 @@ This section is a quick running log of notable changes in this fork and synced u
 
 ### Fork Improvements
 
+- **2026-04-21**: Fixed mixed-content split-marker callback ingestion without offset pinning:
+  - runtime now applies a bounded boundary lookback (up to marker-seed length) on each growth read, allowing `text + ⟦CAO-EVENT-` chunks to recover when `v1:...⟧` arrives later (including after restart) while benign non-marker continuations still advance offsets to EOF
 - **2026-04-20**: Fixed seed-only callback-tail restart reread edge case:
   - runtime now advances past benign chunks that only end with a bare `⟦CAO-EVENT-` tail after prior log text (preventing persistent restart rereads), while still preserving true seed-split marker chunks for multi-append ingestion
 - **2026-04-21**: Fixed callback cursor pinning on benign split-marker tails:
